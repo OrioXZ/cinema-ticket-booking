@@ -16,14 +16,25 @@ type Service struct {
 	catalog  CatalogRepository
 	bookings BookingRepository
 	locks    LockRepository
+	logger   Logger
 	now      func() time.Time
 }
 
-func NewService(catalog CatalogRepository, bookings BookingRepository, locks LockRepository) *Service {
+type Logger interface {
+	Printf(format string, args ...any)
+}
+
+func NewService(
+	catalog CatalogRepository,
+	bookings BookingRepository,
+	locks LockRepository,
+	logger Logger,
+) *Service {
 	return &Service{
 		catalog:  catalog,
 		bookings: bookings,
 		locks:    locks,
+		logger:   logger,
 		now:      time.Now,
 	}
 }
@@ -144,7 +155,7 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		UserID:         userID,
 		OwnershipToken: token,
 	}
-	ownership, err := s.locks.VerifyAndExtend(ctx, lock, lockTTL)
+	ownership, err := s.locks.VerifyOwnership(ctx, lock)
 	if err != nil {
 		return Booking{}, err
 	}
@@ -176,7 +187,11 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 
 	_, err = s.locks.Release(ctx, lock)
 	if err != nil {
-		return Booking{}, fmt.Errorf("booking created but lock cleanup failed: %w", err)
+		s.logger.Printf(
+			"booking committed but seat lock cleanup failed for showtime %q seat %q",
+			showtimeID,
+			seatNo,
+		)
 	}
 	return confirmed, nil
 }

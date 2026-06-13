@@ -1,8 +1,11 @@
 package booking
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +134,90 @@ func TestConfirmRejectsWrongUserOrToken(t *testing.T) {
 	}
 }
 
+func TestOwnershipVerificationDoesNotExtendExpiry(t *testing.T) {
+	service, _, locks := newTestService()
+	now := time.Date(2026, time.June, 14, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	locks.now = func() time.Time { return now }
+	lock, err := service.AcquireLock(context.Background(), "showtime-1", "A1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalExpiry := locks.expiry("showtime-1", "A1")
+
+	now = now.Add(time.Minute)
+	result, err := locks.VerifyOwnership(context.Background(), lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != OwnershipMatched {
+		t.Fatalf("VerifyOwnership() = %v, want OwnershipMatched", result)
+	}
+	if got := locks.expiry("showtime-1", "A1"); !got.Equal(originalExpiry) {
+		t.Fatalf("expiry = %v, want unchanged %v", got, originalExpiry)
+	}
+}
+
+func TestFailedConfirmationsDoNotExtendExpiry(t *testing.T) {
+	service, _, locks := newTestService()
+	now := time.Date(2026, time.June, 14, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	locks.now = func() time.Time { return now }
+	lock, err := service.AcquireLock(context.Background(), "showtime-1", "A1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalExpiry := locks.expiry("showtime-1", "A1")
+
+	for attempt := 0; attempt < 3; attempt++ {
+		now = now.Add(time.Minute)
+		_, err := service.Confirm(context.Background(), "showtime-1", "A1", "user-1", "wrong-token")
+		if !errors.Is(err, ErrLockNotOwned) {
+			t.Fatalf("Confirm() error = %v, want ErrLockNotOwned", err)
+		}
+		if got := locks.expiry("showtime-1", "A1"); !got.Equal(originalExpiry) {
+			t.Fatalf("attempt %d expiry = %v, want unchanged %v", attempt, got, originalExpiry)
+		}
+	}
+
+	now = originalExpiry.Add(time.Millisecond)
+	_, err = service.Confirm(context.Background(), "showtime-1", "A1", "user-1", lock.OwnershipToken)
+	if !errors.Is(err, ErrLockNotFound) {
+		t.Fatalf("Confirm() after expiry error = %v, want ErrLockNotFound", err)
+	}
+}
+
+func TestConfirmReturnsBookingWhenLockCleanupFails(t *testing.T) {
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	service, bookings, locks := newTestServiceWithLogger(logger)
+	lock, err := service.AcquireLock(context.Background(), "showtime-1", "A1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks.releaseErr = errors.New("redis://:secret@redis cleanup unavailable")
+
+	confirmed, err := service.Confirm(
+		context.Background(),
+		"showtime-1",
+		"A1",
+		"user-1",
+		lock.OwnershipToken,
+	)
+	if err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	if confirmed.Status != BookingStatusConfirmed || bookings.count() != 1 {
+		t.Fatalf("confirmed = %#v, booking count = %d", confirmed, bookings.count())
+	}
+	if !strings.Contains(logs.String(), "seat lock cleanup failed") {
+		t.Fatalf("cleanup log = %q", logs.String())
+	}
+	if strings.Contains(logs.String(), lock.OwnershipToken) || strings.Contains(logs.String(), "secret") {
+		t.Fatal("cleanup log exposed ownership token or credentials")
+	}
+}
+
 func TestDuplicateBookingIsConflict(t *testing.T) {
 	service, bookings, _ := newTestService()
 	bookings.items = append(bookings.items, Booking{
@@ -223,6 +310,10 @@ func TestSeatMapResolvesAvailableLockedAndBooked(t *testing.T) {
 }
 
 func newTestService() (*Service, *fakeBookings, *fakeLocks) {
+	return newTestServiceWithLogger(log.New(&bytes.Buffer{}, "", 0))
+}
+
+func newTestServiceWithLogger(logger Logger) (*Service, *fakeBookings, *fakeLocks) {
 	catalog := &fakeCatalog{showtime: Showtime{
 		ID: "showtime-1", MovieID: "movie-1", Seats: []string{"A1", "A2", "A3"},
 	}}
@@ -231,7 +322,7 @@ func newTestService() (*Service, *fakeBookings, *fakeLocks) {
 		items: make(map[string]fakeLockEntry),
 		now:   time.Now,
 	}
-	return NewService(catalog, bookings, locks), bookings, locks
+	return NewService(catalog, bookings, locks, logger), bookings, locks
 }
 
 type fakeCatalog struct {
@@ -250,8 +341,9 @@ func (f *fakeCatalog) GetShowtime(_ context.Context, id string) (Showtime, error
 }
 
 type fakeBookings struct {
-	mu    sync.Mutex
-	items []Booking
+	mu        sync.Mutex
+	items     []Booking
+	createErr error
 }
 
 func (f *fakeBookings) ListBookedSeats(_ context.Context, showtimeID string) (map[string]struct{}, error) {
@@ -280,6 +372,9 @@ func (f *fakeBookings) IsBooked(_ context.Context, showtimeID, seatNo string) (b
 func (f *fakeBookings) Create(_ context.Context, booking Booking) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return f.createErr
+	}
 	for _, item := range f.items {
 		if item.ShowtimeID == booking.ShowtimeID && item.SeatNo == booking.SeatNo {
 			return ErrDuplicateBooking
@@ -313,9 +408,11 @@ type fakeLockEntry struct {
 }
 
 type fakeLocks struct {
-	mu    sync.Mutex
-	items map[string]fakeLockEntry
-	now   func() time.Time
+	mu         sync.Mutex
+	items      map[string]fakeLockEntry
+	now        func() time.Time
+	verifyErr  error
+	releaseErr error
 }
 
 func (f *fakeLocks) Acquire(_ context.Context, lock SeatLock, ttl time.Duration) (bool, error) {
@@ -355,13 +452,12 @@ func (f *fakeLocks) GetMany(_ context.Context, showtimeID string, seatNos []stri
 	return result, nil
 }
 
-func (f *fakeLocks) VerifyAndExtend(
-	_ context.Context,
-	lock SeatLock,
-	ttl time.Duration,
-) (OwnershipResult, error) {
+func (f *fakeLocks) VerifyOwnership(_ context.Context, lock SeatLock) (OwnershipResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.verifyErr != nil {
+		return OwnershipMissing, f.verifyErr
+	}
 	f.removeExpired()
 	key := lockKey(lock.ShowtimeID, lock.SeatNo)
 	entry, exists := f.items[key]
@@ -371,14 +467,15 @@ func (f *fakeLocks) VerifyAndExtend(
 	if entry.lock.UserID != lock.UserID || entry.lock.OwnershipToken != lock.OwnershipToken {
 		return OwnershipNotMatched, nil
 	}
-	entry.expiresAt = f.now().Add(ttl)
-	f.items[key] = entry
 	return OwnershipMatched, nil
 }
 
 func (f *fakeLocks) Release(_ context.Context, lock SeatLock) (ReleaseResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return ReleaseMissing, f.releaseErr
+	}
 	f.removeExpired()
 	key := lockKey(lock.ShowtimeID, lock.SeatNo)
 	entry, exists := f.items[key]
@@ -405,6 +502,13 @@ func (f *fakeLocks) count() int {
 	defer f.mu.Unlock()
 	f.removeExpired()
 	return len(f.items)
+}
+
+func (f *fakeLocks) expiry(showtimeID, seatNo string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeExpired()
+	return f.items[lockKey(showtimeID, seatNo)].expiresAt
 }
 
 func (f *fakeLocks) removeExpired() {

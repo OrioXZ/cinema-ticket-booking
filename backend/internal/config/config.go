@@ -20,6 +20,11 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	mongoDatabase := os.Getenv("MONGO_DATABASE")
+	if mongoDatabase == "" {
+		return Config{}, fmt.Errorf("MONGO_DATABASE is required")
+	}
+
 	mongoURI, err := loadMongoURI()
 	if err != nil {
 		return Config{}, err
@@ -29,7 +34,7 @@ func Load() (Config, error) {
 		AppEnv:            valueOrDefault("APP_ENV", "development"),
 		Port:              valueOrDefault("BACKEND_PORT", "8080"),
 		MongoURI:          mongoURI,
-		MongoDatabase:     valueOrDefault("MONGO_DATABASE", "cinema"),
+		MongoDatabase:     mongoDatabase,
 		RedisURI:          os.Getenv("REDIS_URI"),
 		DependencyTimeout: defaultDependencyTimeout,
 	}

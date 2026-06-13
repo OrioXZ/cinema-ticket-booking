@@ -40,11 +40,13 @@ MongoDB indexes:
 3. It checks durable booking state.
 4. Redis `SET NX` creates a five-minute lock with a random ownership token.
 5. Durable booking state is checked again after acquisition.
-6. Confirmation atomically compares the user ID and token and refreshes that
-   exact owner's five-minute lease.
+6. Confirmation atomically compares the user ID and token without changing the
+   original five-minute TTL.
 7. MongoDB inserts the `CONFIRMED` booking.
 8. The unique index rejects any competing booking for that seat.
-9. A Lua compare-and-delete safely removes the owned lock.
+9. A Lua compare-and-delete attempts to remove the owned lock.
+10. Redis cleanup is best effort; MongoDB commit remains a successful booking
+    even if cleanup fails.
 
 ## Seat State
 
@@ -67,16 +69,25 @@ The ownership token is 32 random bytes encoded as hexadecimal. Release compares
 the complete serialized owner and deletes only inside a Lua script. A stale
 token, including one for the same user, cannot remove a newer lock. Redis TTL
 automatically makes abandoned locks available after five minutes. Confirmation
-uses a separate compare-and-`PEXPIRE` Lua script, so a lock is extended only
-when both ownership fields match atomically.
+uses a separate compare-only Lua script. It returns missing, mismatched, or
+matched atomically and never resets or increases the remaining TTL.
 
 ## Correctness Boundary
 
-Redis and MongoDB cannot participate in one atomic transaction. If the process
-stops after booking insertion and before lock deletion, the booking remains
-durable and the lock expires. If a lock expires during an in-flight
-confirmation, MongoDB's unique index still prevents two confirmed bookings.
-The unique index, not the temporary lock, is the final correctness boundary.
+Redis and MongoDB cannot participate in one atomic transaction. MongoDB
+insertion is the durable success boundary. If lock cleanup fails afterward, the
+API still returns the confirmed booking and logs the cleanup failure without
+ownership data. The lock expires at its original deadline. If a lock expires
+during an in-flight confirmation, MongoDB's unique index still prevents two
+confirmed bookings. The unique index, not the temporary lock, is the final
+correctness boundary.
+
+## Configuration
+
+`MONGO_DATABASE` is required independently of connection addressing. A complete
+`MONGO_URI` may be supplied, or the URI may be assembled from host and
+credentials, but the database selected by the application is always the
+explicit `MONGO_DATABASE` value. The application does not infer it from a URI.
 
 ## Deferred Work
 

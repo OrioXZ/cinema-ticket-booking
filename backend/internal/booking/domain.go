@@ -106,6 +106,6 @@ type LockRepository interface {
 	Acquire(context.Context, SeatLock, time.Duration) (bool, error)
 	Get(context.Context, string, string) (*SeatLock, error)
 	GetMany(context.Context, string, []string) (map[string]SeatLock, error)
-	VerifyAndExtend(context.Context, SeatLock, time.Duration) (OwnershipResult, error)
+	VerifyOwnership(context.Context, SeatLock) (OwnershipResult, error)
 	Release(context.Context, SeatLock) (ReleaseResult, error)
 }

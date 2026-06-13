@@ -21,7 +21,7 @@ redis.call("DEL", KEYS[1])
 return 1
 `)
 
-var verifyAndExtendScript = goredis.NewScript(`
+var verifyOwnershipScript = goredis.NewScript(`
 local current = redis.call("GET", KEYS[1])
 if not current then
   return 0
@@ -29,7 +29,6 @@ end
 if current ~= ARGV[1] then
   return 2
 end
-redis.call("PEXPIRE", KEYS[1], ARGV[2])
 return 1
 `)
 
@@ -94,21 +93,16 @@ func (r *RedisLockRepository) GetMany(ctx context.Context, showtimeID string, se
 	return locks, nil
 }
 
-func (r *RedisLockRepository) VerifyAndExtend(
-	ctx context.Context,
-	lock SeatLock,
-	ttl time.Duration,
-) (OwnershipResult, error) {
+func (r *RedisLockRepository) VerifyOwnership(ctx context.Context, lock SeatLock) (OwnershipResult, error) {
 	value, err := lockValue(lock)
 	if err != nil {
 		return OwnershipMissing, err
 	}
-	result, err := verifyAndExtendScript.Run(
+	result, err := verifyOwnershipScript.Run(
 		ctx,
 		r.client,
 		[]string{lockKey(lock.ShowtimeID, lock.SeatNo)},
 		value,
-		ttl.Milliseconds(),
 	).Int()
 	if err != nil {
 		return OwnershipMissing, err

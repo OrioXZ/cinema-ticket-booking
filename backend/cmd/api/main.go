@@ -65,7 +65,7 @@ func main() {
 	cancelInitialize()
 
 	lockRepository := booking.NewRedisLockRepository(redisClient.Raw())
-	bookingService := booking.NewService(bookingRepository, bookingRepository, lockRepository)
+	bookingService := booking.NewService(bookingRepository, bookingRepository, lockRepository, log.Default())
 	bookingHandler := booking.NewHandler(bookingService)
 
 	router := gin.New()

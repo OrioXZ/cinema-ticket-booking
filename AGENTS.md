@@ -33,7 +33,7 @@ Do not replace a mandatory technology without explicit user approval.
 - Seat locks expire after five minutes.
 - A seat lock must have an ownership token, not only a user ID.
 - Only the lock owner may confirm or release a lock.
-- Lock release and lock extension must verify ownership atomically.
+- Lock release and confirmation ownership verification must be atomic.
 - MongoDB must enforce a unique index for the combination of showtime and seat.
 - Other connected users must receive seat-state changes in realtime.
 - Admin endpoints must reject normal users.
@@ -95,6 +95,7 @@ Redis services running:
 ```powershell
 cd backend
 $env:MONGO_URI = "mongodb://cinema:cinema_dev_password@127.0.0.1:27017/?authSource=admin"
+$env:MONGO_DATABASE = "cinema"
 $env:REDIS_URI = "redis://127.0.0.1:6379/15"
 go test -tags=integration ./internal/booking
 cd ..

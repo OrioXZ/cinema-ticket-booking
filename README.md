@@ -29,7 +29,9 @@ Services:
 - Proxied health: <http://localhost:5173/api/health>
 
 Compose has development defaults. Copy `.env.example` to `.env` only when
-customizing them. Stop the stack with `docker compose down`.
+customizing them. `MONGO_DATABASE` is always required by the backend, including
+when `MONGO_URI` is supplied; Compose explicitly provides its development
+database value. Stop the stack with `docker compose down`.
 
 ## Seeded Data
 
@@ -100,16 +102,19 @@ random bits from `crypto/rand`; user ID alone cannot release or confirm a lock.
 Release uses one Lua compare-and-delete operation. Seat maps use `MGET` for the
 configured seats and never use Redis `KEYS`.
 
-Confirmation validates the showtime and seat, verifies both lock owner fields,
-atomically refreshes the exact owner's five-minute lease, inserts a `CONFIRMED`
-booking, and safely releases the lock. MongoDB's unique compound index on
-`(showtime_id, seat_no)` is the final double-booking barrier. Duplicate keys
-return HTTP `409`.
+Confirmation validates the showtime and seat and atomically compares both lock
+owner fields without changing the lock's remaining TTL. A correct owner can
+confirm only during the original five-minute window; repeated attempts never
+refresh it. MongoDB then inserts the `CONFIRMED` booking. Its unique compound
+index on `(showtime_id, seat_no)` is the final double-booking barrier, and
+duplicate keys return HTTP `409`.
 
-Redis and MongoDB do not share a transaction. A crash after MongoDB commits but
-before Redis cleanup can leave a lock until its TTL expires, and a lock can
-expire during an in-flight confirmation. Neither case permits two durable
-bookings because the MongoDB unique index remains authoritative.
+Successful MongoDB insertion is the durable success boundary. Redis lock
+release afterward is best effort: a cleanup error is logged and the API still
+returns the confirmed booking. The remaining lock may temporarily appear until
+its original TTL expires. Redis and MongoDB do not share a transaction, but
+these cases cannot permit two durable bookings because the MongoDB unique index
+remains authoritative.
 
 ## Local Development
 
@@ -146,6 +151,7 @@ Opt-in real MongoDB/Redis integration and concurrency test:
 docker compose up -d mongodb redis
 cd backend
 $env:MONGO_URI = "mongodb://cinema:cinema_dev_password@127.0.0.1:27017/?authSource=admin"
+$env:MONGO_DATABASE = "cinema"
 $env:REDIS_URI = "redis://127.0.0.1:6379/15"
 go test -tags=integration ./internal/booking
 cd ..
@@ -187,3 +193,5 @@ docs/                       Assignment and architecture notes
 - The Vue screen remains the infrastructure status page; booking UI is Phase 5.
 - Payment is the mock confirmation action.
 - Redis/MongoDB confirmation is not a cross-system transaction.
+- Post-commit Redis cleanup has no reconciliation worker yet; an owned lock may
+  remain visible until its original TTL expires.

@@ -20,6 +20,12 @@
 - [x] Add MongoDB unique index for `(showtime_id, seat_no)`
 - [x] Add focused unit and concurrency tests
 - [x] Add opt-in real MongoDB/Redis integration coverage
+- [x] Verify confirmation ownership atomically without renewing lock TTL
+- [x] Treat MongoDB insertion as the durable booking success boundary
+- [x] Make post-commit Redis cleanup best effort and observable
+- [x] Require explicit `MONGO_DATABASE` configuration
+- [x] Add focused HTTP error-contract coverage
+- [x] Add real Redis ownership, stale-token, expiry, and TTL coverage
 
 Phase 2 uses temporary `X-User-ID` and `X-User-Role` headers. Phase 4 replaces
 this development-only boundary with verified Firebase claims.

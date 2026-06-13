@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -49,7 +51,7 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 	}
 
 	lockRepository := NewRedisLockRepository(redisClient)
-	service := NewService(repository, repository, lockRepository)
+	service := NewService(repository, repository, lockRepository, log.New(io.Discard, "", 0))
 
 	const lockAttempts = 24
 	var lockWins atomic.Int32
@@ -103,6 +105,123 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 	})
 	if !errors.Is(err, ErrDuplicateBooking) {
 		t.Fatalf("duplicate Create() error = %v, want ErrDuplicateBooking", err)
+	}
+}
+
+func TestRealRedisOwnershipAndTTL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	redisOptions, err := goredis.ParseURL(envOrDefault("REDIS_URI", "redis://127.0.0.1:6379/15"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisClient := goredis.NewClient(redisOptions)
+	defer redisClient.Close()
+
+	repository := NewRedisLockRepository(redisClient)
+	showtimeID := "integration-ownership"
+	seatNos := []string{"A1", "A2"}
+	for _, seatNo := range seatNos {
+		key := lockKey(showtimeID, seatNo)
+		if err := redisClient.Del(ctx, key).Err(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = redisClient.Del(context.Background(), key).Err()
+		})
+	}
+
+	const shortTTL = 1200 * time.Millisecond
+	original := SeatLock{
+		ShowtimeID:     showtimeID,
+		SeatNo:         "A1",
+		UserID:         "user-1",
+		OwnershipToken: "original-token",
+	}
+	acquired, err := repository.Acquire(ctx, original, shortTTL)
+	if err != nil || !acquired {
+		t.Fatalf("Acquire() = %v, %v", acquired, err)
+	}
+	beforeWrongOwnership, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrongToken := original
+	wrongToken.OwnershipToken = "wrong-token"
+	if result, err := repository.Release(ctx, wrongToken); err != nil || result != ReleaseNotOwned {
+		t.Fatalf("wrong-token Release() = %v, %v", result, err)
+	}
+	wrongUser := original
+	wrongUser.UserID = "user-2"
+	if result, err := repository.VerifyOwnership(ctx, wrongUser); err != nil || result != OwnershipNotMatched {
+		t.Fatalf("wrong-user VerifyOwnership() = %v, %v", result, err)
+	}
+	if result, err := repository.VerifyOwnership(ctx, wrongToken); err != nil || result != OwnershipNotMatched {
+		t.Fatalf("wrong-token VerifyOwnership() = %v, %v", result, err)
+	}
+	afterWrongOwnership, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterWrongOwnership <= 0 || afterWrongOwnership > beforeWrongOwnership {
+		t.Fatalf(
+			"PTTL after wrong ownership = %v, want positive and at most %v",
+			afterWrongOwnership,
+			beforeWrongOwnership,
+		)
+	}
+
+	before, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if result, err := repository.VerifyOwnership(ctx, original); err != nil || result != OwnershipMatched {
+		t.Fatalf("matching VerifyOwnership() = %v, %v", result, err)
+	}
+	after, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after <= 0 || after >= before {
+		t.Fatalf("PTTL after verification = %v, want positive and less than %v", after, before)
+	}
+
+	if result, err := repository.Release(ctx, original); err != nil || result != ReleaseSucceeded {
+		t.Fatalf("matching Release() = %v, %v", result, err)
+	}
+	newer := original
+	newer.OwnershipToken = "newer-token"
+	if acquired, err := repository.Acquire(ctx, newer, shortTTL); err != nil || !acquired {
+		t.Fatalf("newer Acquire() = %v, %v", acquired, err)
+	}
+	if result, err := repository.Release(ctx, original); err != nil || result != ReleaseNotOwned {
+		t.Fatalf("stale-token Release() = %v, %v", result, err)
+	}
+	if result, err := repository.Release(ctx, newer); err != nil || result != ReleaseSucceeded {
+		t.Fatalf("newer-owner Release() = %v, %v", result, err)
+	}
+
+	expiring := SeatLock{
+		ShowtimeID:     showtimeID,
+		SeatNo:         "A2",
+		UserID:         "user-1",
+		OwnershipToken: "expiring-token",
+	}
+	if acquired, err := repository.Acquire(ctx, expiring, 150*time.Millisecond); err != nil || !acquired {
+		t.Fatalf("expiring Acquire() = %v, %v", acquired, err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	replacement := expiring
+	replacement.UserID = "user-2"
+	replacement.OwnershipToken = "replacement-token"
+	if acquired, err := repository.Acquire(ctx, replacement, shortTTL); err != nil || !acquired {
+		t.Fatalf("post-expiry Acquire() = %v, %v", acquired, err)
+	}
+	if result, err := repository.Release(ctx, replacement); err != nil || result != ReleaseSucceeded {
+		t.Fatalf("replacement Release() = %v, %v", result, err)
 	}
 }
 
