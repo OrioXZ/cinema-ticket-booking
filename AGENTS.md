@@ -89,6 +89,17 @@ go build -o bin/api.exe ./cmd/api
 cd ..
 ```
 
+Run the opt-in Phase 2 integration and concurrency test with local MongoDB and
+Redis services running:
+
+```powershell
+cd backend
+$env:MONGO_URI = "mongodb://cinema:cinema_dev_password@127.0.0.1:27017/?authSource=admin"
+$env:REDIS_URI = "redis://127.0.0.1:6379/15"
+go test -tags=integration ./internal/booking
+cd ..
+```
+
 Install frontend dependencies, type check, and build:
 
 ```powershell

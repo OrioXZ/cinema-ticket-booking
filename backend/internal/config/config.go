@@ -14,6 +14,7 @@ type Config struct {
 	AppEnv            string
 	Port              string
 	MongoURI          string
+	MongoDatabase     string
 	RedisURI          string
 	DependencyTimeout time.Duration
 }
@@ -28,6 +29,7 @@ func Load() (Config, error) {
 		AppEnv:            valueOrDefault("APP_ENV", "development"),
 		Port:              valueOrDefault("BACKEND_PORT", "8080"),
 		MongoURI:          mongoURI,
+		MongoDatabase:     valueOrDefault("MONGO_DATABASE", "cinema"),
 		RedisURI:          os.Getenv("REDIS_URI"),
 		DependencyTimeout: defaultDependencyTimeout,
 	}

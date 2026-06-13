@@ -12,8 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/booking"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/config"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/health"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/identity"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/mongodb"
 	redisclient "github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/redis"
 )
@@ -54,11 +56,26 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	bookingRepository := booking.NewMongoRepository(mongoClient.Database(cfg.MongoDatabase))
+	initializeCtx, cancelInitialize := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := bookingRepository.Initialize(initializeCtx); err != nil {
+		cancelInitialize()
+		log.Fatalf("initialize booking persistence: %v", err)
+	}
+	cancelInitialize()
+
+	lockRepository := booking.NewRedisLockRepository(redisClient.Raw())
+	bookingService := booking.NewService(bookingRepository, bookingRepository, lockRepository)
+	bookingHandler := booking.NewHandler(bookingService)
+
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(gin.Logger(), gin.Recovery(), identity.DevelopmentMiddleware())
 
 	healthHandler := health.NewHandler(mongoClient, redisClient, cfg.DependencyTimeout)
 	router.GET("/health", healthHandler.Get)
+	api := router.Group("/api")
+	api.GET("/health", healthHandler.Get)
+	bookingHandler.Register(api)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
