@@ -1,0 +1,5 @@
+.cache/
+api.exe
+bin/
+coverage.out
+Dockerfile
