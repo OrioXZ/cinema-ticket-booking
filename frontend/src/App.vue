@@ -20,6 +20,7 @@ const loadingCatalog = ref(false)
 const catalogError = ref('')
 const flash = ref('')
 const bookingsRefresh = ref(0)
+const bookingPanel = ref<InstanceType<typeof BookingPanel> | null>(null)
 let stopAuthObserver: (() => void) | null = null
 
 async function loadCatalog() {
@@ -55,6 +56,11 @@ function signedOut(message = '') {
 }
 
 async function logout() {
+  if (bookingPanel.value?.hasActiveLock()) {
+    tab.value = 'booking'
+    flash.value = 'Release or confirm your selected seat before signing out.'
+    return
+  }
   if (authMode === 'firebase') {
     await firebaseSignOut()
   }
@@ -120,15 +126,24 @@ onBeforeUnmount(() => stopAuthObserver?.())
     <p v-else-if="!showtimes.length" class="muted content">No showtimes are available.</p>
     <div v-else class="content">
       <BookingPanel
-        v-if="tab === 'booking'"
+        ref="bookingPanel"
+        v-show="tab === 'booking'"
         :showtimes="showtimes"
         :selected-id="selectedId"
         @select-showtime="selectedId = $event"
         @confirmed="confirmed"
         @signed-out="signedOut"
       />
-      <MyBookings v-else-if="tab === 'mine'" :key="bookingsRefresh" :refresh-key="bookingsRefresh" />
-      <AdminBookings v-else-if="tab === 'admin' && authSession.isAdmin.value" />
+      <MyBookings
+        v-if="tab === 'mine'"
+        :key="bookingsRefresh"
+        :refresh-key="bookingsRefresh"
+        @signed-out="signedOut"
+      />
+      <AdminBookings
+        v-if="tab === 'admin' && authSession.isAdmin.value"
+        @signed-out="signedOut"
+      />
     </div>
   </div>
 </template>

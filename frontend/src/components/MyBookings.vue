@@ -6,6 +6,9 @@ import { myBookings } from '../api/cinema'
 import type { Booking } from '../types/cinema'
 
 const props = defineProps<{ refreshKey: number }>()
+const emit = defineEmits<{
+  signedOut: [message: string]
+}>()
 const bookings = ref<Booking[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -16,6 +19,10 @@ async function load() {
   try {
     bookings.value = await myBookings()
   } catch (value) {
+    if (value instanceof APIError && value.status === 401) {
+      emit('signedOut', 'Your session ended. Please sign in again.')
+      return
+    }
     error.value =
       value instanceof APIError && value.status === 403
         ? 'Permission denied.'

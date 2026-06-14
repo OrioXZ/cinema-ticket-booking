@@ -5,6 +5,9 @@ import { APIError } from '../api/client'
 import { adminBookings } from '../api/cinema'
 import type { Booking } from '../types/cinema'
 
+const emit = defineEmits<{
+  signedOut: [message: string]
+}>()
 const filter = ref('')
 const appliedFilter = ref('')
 const items = ref<Booking[]>([])
@@ -17,6 +20,10 @@ async function load() {
   try {
     items.value = await adminBookings(appliedFilter.value)
   } catch (value) {
+    if (value instanceof APIError && value.status === 401) {
+      emit('signedOut', 'Your session ended. Please sign in again.')
+      return
+    }
     error.value =
       value instanceof APIError && value.status === 403
         ? 'Permission denied. The backend did not authorize this account.'

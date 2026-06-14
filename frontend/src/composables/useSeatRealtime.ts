@@ -14,6 +14,7 @@ export function useSeatRealtime(
   let reconnectTimer: number | null = null
   let attempts = 0
   let generation = 0
+  let activeRoom = ''
   const processed = new Set<string>()
   const processedOrder: string[] = []
   const revisions = new Map<string, number>()
@@ -38,6 +39,13 @@ export function useSeatRealtime(
   function connect() {
     const room = showtimeId.value
     if (!room) return
+    if (room !== activeRoom) {
+      activeRoom = room
+      attempts = 0
+      processed.clear()
+      processedOrder.length = 0
+      revisions.clear()
+    }
     close()
     const currentGeneration = generation
     status.value = attempts ? 'reconnecting' : 'connecting'
@@ -60,10 +68,11 @@ export function useSeatRealtime(
           update.showtime_id !== room ||
           processed.has(update.event_id)
         ) return
-        const revision = revisions.get(update.seat_no) ?? 0
+        const seatKey = `${room}:${update.seat_no}`
+        const revision = revisions.get(seatKey) ?? 0
         if (update.revision < revision) return
         remember(update.event_id)
-        revisions.set(update.seat_no, update.revision)
+        revisions.set(seatKey, update.revision)
         onUpdate(update)
       } catch {
         // Ignore malformed public messages.

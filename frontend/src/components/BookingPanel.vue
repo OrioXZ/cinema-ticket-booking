@@ -167,6 +167,10 @@ function applyUpdate(update: SeatUpdate) {
 
 const { status: realtimeStatus } = useSeatRealtime(showtimeId, applyUpdate, refreshSeats)
 
+defineExpose({
+  hasActiveLock: () => activeLock.value !== null,
+})
+
 watch(
   () => props.selectedId,
   () => {
