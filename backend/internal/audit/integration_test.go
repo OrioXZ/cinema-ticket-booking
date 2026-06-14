@@ -88,8 +88,13 @@ func TestRedisEventProducesMongoAuditRecord(t *testing.T) {
 	)
 	subscriberCtx, stopSubscriber := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- subscriber.Run(subscriberCtx) }()
-	time.Sleep(100 * time.Millisecond)
+	ready := make(chan struct{}, 1)
+	go func() { done <- subscriber.Run(subscriberCtx, func() { ready <- struct{}{} }) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("audit subscriber did not become ready")
+	}
 
 	event, err := events.New(
 		events.SeatReleased, "showtime-1", "A2", "user-1", "", "", time.Now(),

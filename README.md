@@ -183,9 +183,16 @@ WebSocket delivery are transient.
 
 Redis runs with `notify-keyspace-events Ex`. The backend subscribes to
 `__keyevent@0__:expired`, filters `seat_lock:{showtimeId}:{seatNo}` keys, and
-publishes `seat.lock_expired`. The realtime projection sends `AVAILABLE`, and
-the audit consumer records the timeout. Expiration events can be missed while
-the backend is offline; no polling or reconciliation worker exists in Phase 3.
+checks MongoDB before publishing: a durably booked seat never produces a
+timeout audit or `AVAILABLE` update. For an unbooked seat, one Redis Lua script
+atomically checks that no current lock exists and publishes
+`seat.lock_expired`. A stale notification therefore cannot overwrite a newer
+lock, and a committed booking cannot be broadcast as available.
+
+Expiration events can still be missed while the backend is offline because
+Redis Pub/Sub and keyspace notifications are non-durable. Clients reload the
+authoritative REST seat map after reconnecting. No polling or reconciliation
+worker exists in Phase 3.
 
 ## Audit Logs
 
@@ -212,9 +219,11 @@ Duplicate event delivery is idempotent by `event_id`.
 ## Graceful Shutdown
 
 The backend owns a root application context for the HTTP server, audit
-subscriber, realtime subscriber, and expiration listener. Shutdown stops HTTP
-traffic, cancels subscriptions, closes WebSocket clients, waits for workers,
-and only then closes Redis and MongoDB.
+subscriber, realtime subscriber, and expiration listener. HTTP starts only
+after Redis confirms all three subscriptions; startup has a bounded timeout
+and cancels and joins every worker on failure. Shutdown stops HTTP traffic,
+cancels subscriptions, closes WebSocket clients, waits for workers, and only
+then closes Redis and MongoDB. Pub/Sub remains non-durable after readiness.
 
 ## Local Development
 

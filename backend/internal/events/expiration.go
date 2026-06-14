@@ -10,26 +10,143 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+var publishExpirationIfUnlockedScript = goredis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return 0
+end
+
+redis.call("PUBLISH", ARGV[1], ARGV[2])
+return 1
+`)
+
+type BookingStateReader interface {
+	IsBooked(context.Context, string, string) (bool, error)
+}
+
+type ExpirationPublisher interface {
+	PublishIfUnlocked(
+		context.Context,
+		string,
+		string,
+		DomainEvent,
+	) (bool, error)
+}
+
+type RedisExpirationPublisher struct {
+	client goredis.UniversalClient
+}
+
+func NewRedisExpirationPublisher(client goredis.UniversalClient) *RedisExpirationPublisher {
+	return &RedisExpirationPublisher{client: client}
+}
+
+func (p *RedisExpirationPublisher) PublishIfUnlocked(
+	ctx context.Context,
+	lockKey string,
+	channel string,
+	event DomainEvent,
+) (bool, error) {
+	data, err := Marshal(event)
+	if err != nil {
+		return false, err
+	}
+	result, err := publishExpirationIfUnlockedScript.Run(
+		ctx,
+		p.client,
+		[]string{lockKey},
+		channel,
+		string(data),
+	).Int()
+	if err != nil {
+		return false, err
+	}
+	switch result {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected expiration publish result")
+	}
+}
+
+type ExpirationProcessor struct {
+	bookings  BookingStateReader
+	publisher ExpirationPublisher
+	channel   string
+	logger    Logger
+	now       func() time.Time
+}
+
+func NewExpirationProcessor(
+	bookings BookingStateReader,
+	publisher ExpirationPublisher,
+	channel string,
+	logger Logger,
+) *ExpirationProcessor {
+	return &ExpirationProcessor{
+		bookings: bookings, publisher: publisher, channel: channel, logger: logger, now: time.Now,
+	}
+}
+
+func (p *ExpirationProcessor) Process(ctx context.Context, lockKey string) {
+	showtimeID, seatNo, matched, valid := parseSeatLockKey(lockKey)
+	if !matched {
+		return
+	}
+	if !valid {
+		p.logger.Printf("ignored malformed expired seat-lock key")
+		return
+	}
+
+	booked, err := p.bookings.IsBooked(ctx, showtimeID, seatNo)
+	if err != nil {
+		p.logger.Printf(
+			"failed to check booking state for expired lock at showtime %q seat %q",
+			showtimeID,
+			seatNo,
+		)
+		return
+	}
+	if booked {
+		return
+	}
+
+	event, err := New(SeatLockExpired, showtimeID, seatNo, "", "", "lock expired", p.now())
+	if err != nil {
+		p.logger.Printf(
+			"failed to create lock-expiration event for showtime %q seat %q",
+			showtimeID,
+			seatNo,
+		)
+		return
+	}
+	if _, err := p.publisher.PublishIfUnlocked(ctx, lockKey, p.channel, event); err != nil {
+		p.logger.Printf(
+			"failed to atomically publish lock-expiration event for showtime %q seat %q",
+			showtimeID,
+			seatNo,
+		)
+	}
+}
+
 type ExpirationListener struct {
 	client    goredis.UniversalClient
 	database  int
-	publisher Publisher
-	logger    Logger
-	now       func() time.Time
+	processor *ExpirationProcessor
 }
 
 func NewExpirationListener(
 	client goredis.UniversalClient,
 	database int,
-	publisher Publisher,
-	logger Logger,
+	processor *ExpirationProcessor,
 ) *ExpirationListener {
 	return &ExpirationListener{
-		client: client, database: database, publisher: publisher, logger: logger, now: time.Now,
+		client: client, database: database, processor: processor,
 	}
 }
 
-func (l *ExpirationListener) Run(ctx context.Context) error {
+func (l *ExpirationListener) Run(ctx context.Context, ready func()) error {
 	channel := fmt.Sprintf("__keyevent@%d__:expired", l.database)
 	subscription := l.client.Subscribe(ctx, channel)
 	defer subscription.Close()
@@ -38,6 +155,9 @@ func (l *ExpirationListener) Run(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+	if ready != nil {
+		ready()
 	}
 
 	messages := subscription.Channel()
@@ -49,30 +169,7 @@ func (l *ExpirationListener) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			showtimeID, seatNo, matched, valid := parseSeatLockKey(message.Payload)
-			if !matched {
-				continue
-			}
-			if !valid {
-				l.logger.Printf("ignored malformed expired seat-lock key")
-				continue
-			}
-			event, err := New(SeatLockExpired, showtimeID, seatNo, "", "", "lock expired", l.now())
-			if err != nil {
-				l.logger.Printf(
-					"failed to create lock-expiration event for showtime %q seat %q",
-					showtimeID,
-					seatNo,
-				)
-				continue
-			}
-			if err := l.publisher.Publish(ctx, event); err != nil {
-				l.logger.Printf(
-					"failed to publish lock-expiration event for showtime %q seat %q",
-					showtimeID,
-					seatNo,
-				)
-			}
+			l.processor.Process(ctx, message.Payload)
 		}
 	}
 }

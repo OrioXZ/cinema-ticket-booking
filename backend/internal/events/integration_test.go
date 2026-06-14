@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/audit"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/lifecycle"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/realtime"
 )
 
@@ -36,8 +38,13 @@ func TestRealRedisPublishSubscribeDelivery(t *testing.T) {
 		log.New(io.Discard, "", 0),
 	)
 	done := make(chan error, 1)
-	go func() { done <- subscriber.Run(ctx) }()
-	time.Sleep(100 * time.Millisecond)
+	ready := make(chan struct{}, 1)
+	go func() { done <- subscriber.Run(ctx, func() { ready <- struct{}{} }) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber did not become ready")
+	}
 
 	publisher := events.NewRedisPublisher(client, channel)
 	if err := client.Publish(context.Background(), channel, `{"type":`).Err(); err != nil {
@@ -90,9 +97,14 @@ func TestExpiredSeatLockProducesRealtimeAndAuditEvents(t *testing.T) {
 	})
 
 	channel := fmt.Sprintf("cinema.events.expiration.%d", time.Now().UnixNano())
-	publisher := events.NewRedisPublisher(client, channel)
 	logger := log.New(io.Discard, "", 0)
-	listener := events.NewExpirationListener(client, client.Options().DB, publisher, logger)
+	processor := events.NewExpirationProcessor(
+		staticBookingStateReader{},
+		events.NewRedisExpirationPublisher(client),
+		channel,
+		logger,
+	)
+	listener := events.NewExpirationListener(client, client.Options().DB, processor)
 
 	hub := realtime.NewHub()
 	realtimeClient := hub.Register("showtime-expiration", 4)
@@ -107,17 +119,14 @@ func TestExpiredSeatLockProducesRealtimeAndAuditEvents(t *testing.T) {
 		client, channel, auditConsumer.Handle, logger,
 	)
 
-	var workers sync.WaitGroup
-	for _, run := range []func(context.Context) error{
-		listener.Run, realtimeSubscriber.Run, auditSubscriber.Run,
-	} {
-		workers.Add(1)
-		go func(run func(context.Context) error) {
-			defer workers.Done()
-			_ = run(ctx)
-		}(run)
+	workers, err := lifecycle.Start(ctx, 2*time.Second, []lifecycle.Worker{
+		{Name: "expiration", Run: listener.Run},
+		{Name: "realtime", Run: realtimeSubscriber.Run},
+		{Name: "audit", Run: auditSubscriber.Run},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	time.Sleep(150 * time.Millisecond)
 
 	lockKey := "seat_lock:showtime-expiration:A1"
 	unrelatedKey := "unrelated:expiration"
@@ -160,6 +169,7 @@ func TestExpiredSeatLockProducesRealtimeAndAuditEvents(t *testing.T) {
 	}
 
 	cancel()
+	workers.Stop()
 	hub.Shutdown()
 	done := make(chan struct{})
 	go func() {
@@ -170,6 +180,125 @@ func TestExpiredSeatLockProducesRealtimeAndAuditEvents(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("expiration workers did not stop")
+	}
+}
+
+func TestRedisExpirationPublisherPublishesOnlyWhenUnlocked(t *testing.T) {
+	client := integrationRedis(t)
+	channel := fmt.Sprintf("cinema.events.lua.%d", time.Now().UnixNano())
+	subscription := client.Subscribe(context.Background(), channel)
+	defer subscription.Close()
+	if _, err := subscription.Receive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	messages := subscription.Channel()
+
+	publisher := events.NewRedisExpirationPublisher(client)
+	first, err := events.New(
+		events.SeatLockExpired, "showtime-lua", "A1", "", "", "lock expired", time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := publisher.PublishIfUnlocked(
+		context.Background(),
+		"seat_lock:showtime-lua:A1",
+		channel,
+		first,
+	)
+	if err != nil || !published {
+		t.Fatalf("PublishIfUnlocked() = %v, %v", published, err)
+	}
+	var message *goredis.Message
+	select {
+	case message = <-messages:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for expiration event")
+	}
+	received, err := events.Unmarshal([]byte(message.Payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.ID != first.ID || received.UserID != "" ||
+		strings.Contains(message.Payload, "ownership_token") {
+		t.Fatalf("expiration event = %s", message.Payload)
+	}
+
+	lockKey := "seat_lock:showtime-lua:A2"
+	if err := client.Set(context.Background(), lockKey, "private-lock-value", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Del(context.Background(), lockKey).Err() })
+	second, err := events.New(
+		events.SeatLockExpired, "showtime-lua", "A2", "", "", "lock expired", time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err = publisher.PublishIfUnlocked(context.Background(), lockKey, channel, second)
+	if err != nil || published {
+		t.Fatalf("PublishIfUnlocked() with current lock = %v, %v", published, err)
+	}
+	select {
+	case message := <-messages:
+		t.Fatalf("unexpected second expiration event = %s", message.Payload)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if first.ID == second.ID || first.ID == "" || second.ID == "" {
+		t.Fatalf("event IDs are not unique and valid: %q, %q", first.ID, second.ID)
+	}
+}
+
+func TestStaleExpirationAfterNewLockProducesNoAvailableUpdate(t *testing.T) {
+	client := integrationRedis(t)
+	channel := fmt.Sprintf("cinema.events.race.%d", time.Now().UnixNano())
+	logger := log.New(io.Discard, "", 0)
+	hub := realtime.NewHub()
+	defer hub.Shutdown()
+	realtimeClient := hub.Register("showtime-race", 1)
+	subscriber := events.NewRedisSubscriber(
+		client,
+		channel,
+		realtime.NewConsumer(hub).Handle,
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() { done <- subscriber.Run(ctx, func() { ready <- struct{}{} }) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("realtime subscriber did not become ready")
+	}
+
+	lockKey := "seat_lock:showtime-race:A1"
+	if err := client.Set(ctx, lockKey, "new-owner-private-value", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Del(context.Background(), lockKey).Err() })
+	processor := events.NewExpirationProcessor(
+		staticBookingStateReader{},
+		events.NewRedisExpirationPublisher(client),
+		channel,
+		logger,
+	)
+	processor.Process(ctx, lockKey)
+
+	select {
+	case data := <-realtimeClient.Messages():
+		t.Fatalf("stale expiration produced realtime update: %s", data)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("realtime subscriber did not stop")
 	}
 }
 
@@ -198,6 +327,12 @@ func envOrDefault(key, fallback string) string {
 type memoryAuditRepository struct {
 	mu      sync.Mutex
 	entries []audit.Log
+}
+
+type staticBookingStateReader struct{}
+
+func (staticBookingStateReader) IsBooked(context.Context, string, string) (bool, error) {
+	return false, nil
 }
 
 func (r *memoryAuditRepository) Insert(_ context.Context, entry audit.Log) error {

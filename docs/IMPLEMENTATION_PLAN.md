@@ -39,6 +39,9 @@ this development-only boundary with verified Firebase claims.
 - [x] Add asynchronous idempotent audit logging
 - [x] Add Redis seat-lock expiration events
 - [x] Add graceful background-worker lifecycle
+- [x] Gate expiration events on durable booking state
+- [x] Atomically suppress stale expiration events when a newer lock exists
+- [x] Wait for Redis subscriber readiness before starting HTTP
 - [x] Add focused unit, race, and integration tests
 
 ## Phase 4 - Authentication and authorization

@@ -64,7 +64,7 @@ func TestSubscriberStopsOnCanceledContext(t *testing.T) {
 		log.New(io.Discard, "", 0),
 	)
 	done := make(chan error, 1)
-	go func() { done <- subscriber.Run(ctx) }()
+	go func() { done <- subscriber.Run(ctx, nil) }()
 	select {
 	case err := <-done:
 		if err != nil {

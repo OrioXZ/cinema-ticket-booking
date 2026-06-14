@@ -220,6 +220,51 @@ func TestConfirmReturnsBookingWhenLockCleanupFails(t *testing.T) {
 	}
 }
 
+func TestCommittedBookingWithFailedCleanupCannotExpireToAvailable(t *testing.T) {
+	service, bookings, locks := newTestService()
+	lock, err := service.AcquireLock(context.Background(), "showtime-1", "A1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks.releaseErr = errors.New("cleanup unavailable")
+	if _, err := service.Confirm(
+		context.Background(),
+		"showtime-1",
+		"A1",
+		"user-1",
+		lock.OwnershipToken,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	expirations := &fakeExpirationPublisher{}
+	processor := events.NewExpirationProcessor(
+		bookings,
+		expirations,
+		"cinema.events",
+		log.New(&bytes.Buffer{}, "", 0),
+	)
+	processor.Process(context.Background(), "seat_lock:showtime-1:A1")
+
+	if expirations.calls != 0 {
+		t.Fatalf("expiration publish calls = %d, want 0", expirations.calls)
+	}
+	if expirations.timeoutAudits != 0 || expirations.availableUpdates != 0 {
+		t.Fatalf(
+			"timeout audits = %d, available updates = %d, want both 0",
+			expirations.timeoutAudits,
+			expirations.availableUpdates,
+		)
+	}
+	seats, err := service.SeatMap(context.Background(), "showtime-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seats[0].State != SeatStateBooked {
+		t.Fatalf("A1 state = %s, want BOOKED", seats[0].State)
+	}
+}
+
 func TestDuplicateBookingIsConflict(t *testing.T) {
 	service, bookings, _ := newTestService()
 	bookings.items = append(bookings.items, Booking{
@@ -346,6 +391,24 @@ type fakeBookings struct {
 	mu        sync.Mutex
 	items     []Booking
 	createErr error
+}
+
+type fakeExpirationPublisher struct {
+	calls            int
+	timeoutAudits    int
+	availableUpdates int
+}
+
+func (p *fakeExpirationPublisher) PublishIfUnlocked(
+	context.Context,
+	string,
+	string,
+	events.DomainEvent,
+) (bool, error) {
+	p.calls++
+	p.timeoutAudits++
+	p.availableUpdates++
+	return true, nil
 }
 
 func (f *fakeBookings) ListBookedSeats(_ context.Context, showtimeID string) (map[string]struct{}, error) {

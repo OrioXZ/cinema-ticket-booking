@@ -106,9 +106,13 @@ Duplicate event IDs are treated as already processed.
 
 Redis enables keyevent expiration notifications with `Ex`. The backend
 subscribes to `__keyevent@<db>__:expired`, accepts only keys shaped as
-`seat_lock:{showtimeId}:{seatNo}`, and republishes `seat.lock_expired` through
-`cinema.events`. Expiration notifications contain no former owner, so timeout
-events omit `user_id`.
+`seat_lock:{showtimeId}:{seatNo}`, and checks MongoDB's durable booking state.
+Booked seats stop there, so they produce no timeout audit and no public
+`AVAILABLE` update. For unbooked seats, one Redis Lua script atomically checks
+that the current lock key is absent and publishes `seat.lock_expired` through
+`cinema.events`. A newer lock present before the script runs suppresses the
+stale expiration event. Expiration notifications contain no former owner, so
+timeout events omit `user_id`.
 
 ## Booking Correctness
 
@@ -126,6 +130,11 @@ Startup initializes MongoDB indexes and Redis before starting:
 - Realtime Redis subscriber
 - Lock-expiration listener
 - HTTP/WebSocket server
+
+Each Redis worker signals readiness only after Redis confirms its subscription.
+The application waits for all three signals with a bounded timeout before
+opening HTTP traffic. A pre-readiness failure cancels and joins all workers and
+returns through normal resource cleanup.
 
 Shutdown stops HTTP traffic, cancels the root worker context, closes WebSocket
 clients, waits for subscriptions to exit, then disconnects Redis and MongoDB.

@@ -48,7 +48,7 @@ func NewRedisSubscriber(
 	}
 }
 
-func (s *RedisSubscriber) Run(ctx context.Context) error {
+func (s *RedisSubscriber) Run(ctx context.Context, ready func()) error {
 	subscription := s.client.Subscribe(ctx, s.channel)
 	defer subscription.Close()
 	if _, err := subscription.Receive(ctx); err != nil {
@@ -56,6 +56,9 @@ func (s *RedisSubscriber) Run(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+	if ready != nil {
+		ready()
 	}
 
 	messages := subscription.Channel()

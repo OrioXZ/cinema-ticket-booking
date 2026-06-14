@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/health"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/identity"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/lifecycle"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/mongodb"
 	redisclient "github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/redis"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/realtime"
@@ -104,26 +104,33 @@ func main() {
 		realtimeConsumer.Handle,
 		log.Default(),
 	)
+	expirationProcessor := events.NewExpirationProcessor(
+		bookingRepository,
+		events.NewRedisExpirationPublisher(redisClient.Raw()),
+		cfg.EventChannel,
+		log.Default(),
+	)
 	expirationListener := events.NewExpirationListener(
 		redisClient.Raw(),
 		redisClient.Raw().Options().DB,
-		eventPublisher,
-		log.Default(),
+		expirationProcessor,
 	)
 
-	var workers sync.WaitGroup
-	startWorker := func(name string, run func(context.Context) error) {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			if err := run(appCtx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("%s stopped with error", name)
-			}
-		}()
+	workers, err := lifecycle.Start(appCtx, cfg.DependencyTimeout, []lifecycle.Worker{
+		{Name: "audit subscriber", Run: auditSubscriber.Run},
+		{Name: "realtime subscriber", Run: realtimeSubscriber.Run},
+		{Name: "lock expiration listener", Run: expirationListener.Run},
+	})
+	if err != nil {
+		log.Printf("start background workers: %v", err)
+		hub.Shutdown()
+		return
 	}
-	startWorker("audit subscriber", auditSubscriber.Run)
-	startWorker("realtime subscriber", realtimeSubscriber.Run)
-	startWorker("lock expiration listener", expirationListener.Run)
+	go func() {
+		for workerError := range workers.Errors() {
+			log.Printf("%s stopped with error", workerError.Name)
+		}
+	}()
 
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery(), identity.DevelopmentMiddleware())
@@ -158,6 +165,7 @@ func main() {
 	}
 
 	cancelApp()
+	workers.Stop()
 	hub.Shutdown()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
