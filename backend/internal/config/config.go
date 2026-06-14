@@ -16,6 +16,8 @@ type Config struct {
 	MongoURI          string
 	MongoDatabase     string
 	RedisURI          string
+	EventChannel      string
+	WebSocketOrigins  []string
 	DependencyTimeout time.Duration
 }
 
@@ -36,6 +38,8 @@ func Load() (Config, error) {
 		MongoURI:          mongoURI,
 		MongoDatabase:     mongoDatabase,
 		RedisURI:          os.Getenv("REDIS_URI"),
+		EventChannel:      valueOrDefault("EVENT_CHANNEL", "cinema.events"),
+		WebSocketOrigins:  splitCSV(valueOrDefault("WEBSOCKET_ALLOWED_ORIGINS", "http://localhost:5173")),
 		DependencyTimeout: defaultDependencyTimeout,
 	}
 
@@ -44,6 +48,16 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func splitCSV(value string) []string {
+	var values []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }
 
 func loadMongoURI() (string, error) {

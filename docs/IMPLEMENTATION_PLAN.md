@@ -32,10 +32,21 @@ this development-only boundary with verified Firebase claims.
 
 ## Phase 3 - Realtime and asynchronous events
 
-- [ ] Add WebSocket hub
-- [ ] Publish seat and booking events through Redis Pub/Sub
-- [ ] Broadcast updates to clients
-- [ ] Add asynchronous audit logging
+- [x] Add versioned domain event contract
+- [x] Publish seat and booking events through Redis Pub/Sub
+- [x] Add WebSocket hub and showtime rooms
+- [x] Broadcast public seat-state updates
+- [x] Add asynchronous idempotent audit logging
+- [x] Add Redis seat-lock expiration events
+- [x] Add graceful background-worker lifecycle
+- [x] Gate expiration events on durable booking state
+- [x] Atomically suppress stale expiration events when a newer lock exists
+- [x] Wait for Redis subscriber readiness before starting HTTP
+- [x] Add per-seat Redis generations and generation-bearing expiry markers
+- [x] Atomically combine public state transitions with event publication
+- [x] Make `BOOKED` terminal for Redis realtime state
+- [x] Exit non-zero after cleanup on startup failure
+- [x] Add focused unit, race, and integration tests
 
 ## Phase 4 - Authentication and authorization
 

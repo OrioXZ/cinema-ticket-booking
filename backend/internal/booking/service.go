@@ -8,16 +8,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 )
 
 const lockTTL = 5 * time.Minute
 
 type Service struct {
-	catalog  CatalogRepository
-	bookings BookingRepository
-	locks    LockRepository
-	logger   Logger
-	now      func() time.Time
+	catalog   CatalogRepository
+	bookings  BookingRepository
+	locks     LockRepository
+	publisher events.Publisher
+	logger    Logger
+	now       func() time.Time
 }
 
 type Logger interface {
@@ -28,14 +31,16 @@ func NewService(
 	catalog CatalogRepository,
 	bookings BookingRepository,
 	locks LockRepository,
+	publisher events.Publisher,
 	logger Logger,
 ) *Service {
 	return &Service{
-		catalog:  catalog,
-		bookings: bookings,
-		locks:    locks,
-		logger:   logger,
-		now:      time.Now,
+		catalog:   catalog,
+		bookings:  bookings,
+		locks:     locks,
+		publisher: publisher,
+		logger:    logger,
+		now:       time.Now,
 	}
 }
 
@@ -84,6 +89,7 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 		return SeatLock{}, err
 	}
 	if booked {
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already booked")
 		return SeatLock{}, ErrSeatConflict
 	}
 
@@ -98,21 +104,51 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 		OwnershipToken: token,
 		ExpiresAt:      s.now().UTC().Add(lockTTL),
 	}
-	acquired, err := s.locks.Acquire(ctx, lock, lockTTL)
+	lockedEvent, err := s.newEvent(
+		events.SeatLocked,
+		showtimeID,
+		seatNo,
+		userID,
+		"",
+		"",
+	)
+	if err != nil {
+		return SeatLock{}, err
+	}
+	acquired, generation, err := s.locks.Acquire(ctx, lock, lockTTL, lockedEvent)
 	if err != nil {
 		return SeatLock{}, err
 	}
 	if !acquired {
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already locked")
 		return SeatLock{}, ErrSeatConflict
 	}
+	lock.Generation = generation
 
 	booked, err = s.bookings.IsBooked(ctx, showtimeID, seatNo)
 	if err != nil {
-		_, _ = s.locks.Release(ctx, lock)
+		s.releaseAfterFailedAcquire(ctx, lock)
 		return SeatLock{}, err
 	}
 	if booked {
-		_, _ = s.locks.Release(ctx, lock)
+		bookedEvent, eventErr := s.newEvent(
+			events.BookingConfirmed,
+			showtimeID,
+			seatNo,
+			"",
+			"",
+			"durable booking detected after lock acquisition",
+		)
+		if eventErr != nil {
+			s.releaseAfterFailedAcquire(ctx, lock)
+		} else if confirmErr := s.locks.Confirm(ctx, lock, bookedEvent); confirmErr != nil {
+			s.logger.Printf(
+				"durable booking detected but Redis BOOKED correction failed for showtime %q seat %q",
+				showtimeID,
+				seatNo,
+			)
+		}
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already booked")
 		return SeatLock{}, ErrSeatConflict
 	}
 	return lock, nil
@@ -124,12 +160,23 @@ func (s *Service) ReleaseLock(ctx context.Context, showtimeID, seatNo, userID, t
 	if _, err := s.validateSeat(ctx, showtimeID, seatNo); err != nil {
 		return err
 	}
+	releasedEvent, err := s.newEvent(
+		events.SeatReleased,
+		showtimeID,
+		seatNo,
+		userID,
+		"",
+		"",
+	)
+	if err != nil {
+		return err
+	}
 	result, err := s.locks.Release(ctx, SeatLock{
 		ShowtimeID:     showtimeID,
 		SeatNo:         seatNo,
 		UserID:         userID,
 		OwnershipToken: token,
-	})
+	}, releasedEvent)
 	if err != nil {
 		return err
 	}
@@ -155,7 +202,7 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		UserID:         userID,
 		OwnershipToken: token,
 	}
-	ownership, err := s.locks.VerifyOwnership(ctx, lock)
+	ownership, generation, err := s.locks.VerifyOwnership(ctx, lock)
 	if err != nil {
 		return Booking{}, err
 	}
@@ -165,6 +212,7 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 	if ownership == OwnershipNotMatched {
 		return Booking{}, ErrLockNotOwned
 	}
+	lock.Generation = generation
 
 	id, err := randomID(16)
 	if err != nil {
@@ -184,16 +232,105 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		}
 		return Booking{}, err
 	}
-
-	_, err = s.locks.Release(ctx, lock)
-	if err != nil {
+	confirmedEvent, eventErr := s.newEvent(
+		events.BookingConfirmed,
+		showtimeID,
+		seatNo,
+		userID,
+		confirmed.ID,
+		"",
+	)
+	if eventErr != nil {
 		s.logger.Printf(
-			"booking committed but seat lock cleanup failed for showtime %q seat %q",
+			"booking committed but realtime event creation failed for showtime %q seat %q",
+			showtimeID,
+			seatNo,
+		)
+		return confirmed, nil
+	}
+	if err := s.locks.Confirm(ctx, lock, confirmedEvent); err != nil {
+		s.logger.Printf(
+			"booking committed but Redis BOOKED transition failed for showtime %q seat %q",
 			showtimeID,
 			seatNo,
 		)
 	}
 	return confirmed, nil
+}
+
+func (s *Service) releaseAfterFailedAcquire(ctx context.Context, lock SeatLock) {
+	event, err := s.newEvent(
+		events.SeatReleased,
+		lock.ShowtimeID,
+		lock.SeatNo,
+		lock.UserID,
+		"",
+		"lock acquisition rolled back",
+	)
+	if err != nil {
+		return
+	}
+	_, _ = s.locks.Release(ctx, lock, event)
+}
+
+func (s *Service) newEvent(
+	eventType events.Type,
+	showtimeID string,
+	seatNo string,
+	userID string,
+	bookingID string,
+	reason string,
+) (events.DomainEvent, error) {
+	event, err := events.New(
+		eventType,
+		showtimeID,
+		seatNo,
+		userID,
+		bookingID,
+		reason,
+		s.now(),
+	)
+	if err != nil {
+		return events.DomainEvent{}, fmt.Errorf("create %s event: %w", eventType, err)
+	}
+	return event, nil
+}
+
+func (s *Service) publish(
+	ctx context.Context,
+	eventType events.Type,
+	showtimeID string,
+	seatNo string,
+	userID string,
+	bookingID string,
+	reason string,
+) {
+	event, err := events.New(
+		eventType,
+		showtimeID,
+		seatNo,
+		userID,
+		bookingID,
+		reason,
+		s.now(),
+	)
+	if err != nil {
+		s.logger.Printf(
+			"domain event creation failed for type %q showtime %q seat %q",
+			eventType,
+			showtimeID,
+			seatNo,
+		)
+		return
+	}
+	if err := s.publisher.Publish(ctx, event); err != nil {
+		s.logger.Printf(
+			"domain event publish failed for type %q showtime %q seat %q",
+			eventType,
+			showtimeID,
+			seatNo,
+		)
+	}
 }
 
 func (s *Service) MyBookings(ctx context.Context, userID string) ([]Booking, error) {

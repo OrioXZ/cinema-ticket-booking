@@ -21,13 +21,16 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://mongo/test")
 	t.Setenv("MONGO_DATABASE", "test")
 	t.Setenv("REDIS_URI", "redis://redis:6379/1")
+	t.Setenv("EVENT_CHANNEL", "custom.events")
+	t.Setenv("WEBSOCKET_ALLOWED_ORIGINS", "http://localhost:5173, http://localhost:4173")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.AppEnv != "test" || cfg.Port != "9090" || cfg.MongoDatabase != "test" {
+	if cfg.AppEnv != "test" || cfg.Port != "9090" || cfg.MongoDatabase != "test" ||
+		cfg.EventChannel != "custom.events" || len(cfg.WebSocketOrigins) != 2 {
 		t.Fatalf("Load() returned unexpected config: %+v", cfg)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -12,25 +13,36 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/audit"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/booking"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/config"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/health"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/identity"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/lifecycle"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/mongodb"
 	redisclient "github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/redis"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/realtime"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("application stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load configuration: %v", err)
+		return fmt.Errorf("load configuration: %w", err)
 	}
 
 	mongoStartupCtx, cancelMongoStartup := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
 	mongoClient, err := mongodb.Connect(mongoStartupCtx, cfg.MongoURI)
 	cancelMongoStartup()
 	if err != nil {
-		log.Fatalf("connect to MongoDB: %v", err)
+		return fmt.Errorf("connect to MongoDB: %w", err)
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
@@ -44,7 +56,7 @@ func main() {
 	redisClient, err := redisclient.Connect(redisStartupCtx, cfg.RedisURI)
 	cancelRedisStartup()
 	if err != nil {
-		log.Fatalf("connect to Redis: %v", err)
+		return fmt.Errorf("connect to Redis: %w", err)
 	}
 	defer func() {
 		if err := redisClient.Close(); err != nil {
@@ -56,17 +68,75 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	bookingRepository := booking.NewMongoRepository(mongoClient.Database(cfg.MongoDatabase))
+	database := mongoClient.Database(cfg.MongoDatabase)
+	bookingRepository := booking.NewMongoRepository(database)
+	auditRepository := audit.NewMongoRepository(database)
 	initializeCtx, cancelInitialize := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := bookingRepository.Initialize(initializeCtx); err != nil {
 		cancelInitialize()
-		log.Fatalf("initialize booking persistence: %v", err)
+		return fmt.Errorf("initialize booking persistence: %w", err)
+	}
+	if err := auditRepository.Initialize(initializeCtx); err != nil {
+		cancelInitialize()
+		return fmt.Errorf("initialize audit persistence: %w", err)
 	}
 	cancelInitialize()
 
-	lockRepository := booking.NewRedisLockRepository(redisClient.Raw())
-	bookingService := booking.NewService(bookingRepository, bookingRepository, lockRepository, log.Default())
+	appCtx, cancelApp := context.WithCancel(context.Background())
+	defer cancelApp()
+
+	eventPublisher := events.NewRedisPublisher(redisClient.Raw(), cfg.EventChannel)
+	lockRepository := booking.NewRedisLockRepository(redisClient.Raw(), cfg.EventChannel)
+	bookingService := booking.NewService(
+		bookingRepository,
+		bookingRepository,
+		lockRepository,
+		eventPublisher,
+		log.Default(),
+	)
 	bookingHandler := booking.NewHandler(bookingService)
+	hub := realtime.NewHub()
+	websocketHandler := realtime.NewHandler(hub, cfg.WebSocketOrigins)
+
+	auditConsumer := audit.NewConsumer(auditRepository)
+	auditSubscriber := events.NewRedisSubscriber(
+		redisClient.Raw(),
+		cfg.EventChannel,
+		auditConsumer.Handle,
+		log.Default(),
+	)
+	realtimeConsumer := realtime.NewConsumer(hub)
+	realtimeSubscriber := events.NewRedisSubscriber(
+		redisClient.Raw(),
+		cfg.EventChannel,
+		realtimeConsumer.Handle,
+		log.Default(),
+	)
+	expirationProcessor := events.NewExpirationProcessor(
+		bookingRepository,
+		lockRepository,
+		log.Default(),
+	)
+	expirationListener := events.NewExpirationListener(
+		redisClient.Raw(),
+		redisClient.Raw().Options().DB,
+		expirationProcessor,
+	)
+
+	workers, err := lifecycle.Start(appCtx, cfg.DependencyTimeout, []lifecycle.Worker{
+		{Name: "audit subscriber", Run: auditSubscriber.Run},
+		{Name: "realtime subscriber", Run: realtimeSubscriber.Run},
+		{Name: "lock expiration listener", Run: expirationListener.Run},
+	})
+	if err != nil {
+		hub.Shutdown()
+		return fmt.Errorf("start background workers: %w", err)
+	}
+	go func() {
+		for workerError := range workers.Errors() {
+			log.Printf("%s stopped with error", workerError.Name)
+		}
+	}()
 
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery(), identity.DevelopmentMiddleware())
@@ -76,6 +146,7 @@ func main() {
 	api := router.Group("/api")
 	api.GET("/health", healthHandler.Get)
 	bookingHandler.Register(api)
+	router.GET("/ws/showtimes/:showtimeId", websocketHandler.Get)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -83,20 +154,31 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("backend listening on %s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve HTTP: %v", err)
+			serverErrors <- err
 		}
 	}()
 
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
-	<-shutdownSignal
+	var runErr error
+	select {
+	case <-shutdownSignal:
+	case err := <-serverErrors:
+		runErr = fmt.Errorf("HTTP server stopped: %w", err)
+	}
 
+	cancelApp()
+	workers.Stop()
+	hub.Shutdown()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown HTTP server: %v", err)
 	}
+	workers.Wait()
+	return runErr
 }

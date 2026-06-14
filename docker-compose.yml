@@ -29,7 +29,14 @@ services:
   redis:
     image: redis:8.0-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--notify-keyspace-events",
+        "Ex",
+      ]
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
@@ -52,6 +59,8 @@ services:
       MONGO_USERNAME: *mongo-username
       MONGO_PASSWORD: *mongo-password
       REDIS_URI: ${REDIS_URI:-redis://redis:6379/0}
+      EVENT_CHANNEL: ${EVENT_CHANNEL:-cinema.events}
+      WEBSOCKET_ALLOWED_ORIGINS: ${WEBSOCKET_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     depends_on:
