@@ -61,11 +61,13 @@ this development-only boundary with verified Firebase claims.
 
 ## Phase 5 - Frontend MVP
 
-- [ ] Login screen
-- [ ] Seat map
-- [ ] Lock countdown
-- [ ] Mock payment confirmation
-- [ ] Admin booking table with one useful filter
+- [x] Login screen
+- [x] Seat map
+- [x] Lock countdown
+- [x] Mock payment confirmation
+- [x] Personal bookings list
+- [x] Realtime seat updates and reconnect refresh
+- [x] Admin booking table with exact user filter
 
 ## Phase 6 - Submission quality
 

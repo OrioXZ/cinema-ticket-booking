@@ -1,12 +1,11 @@
 # Cinema Ticket Booking
 
-Phase 4 implementation of a cinema ticket booking take-home assignment. The
+Phase 5 implementation of a cinema ticket booking take-home assignment. The
 application provides the core cinema domain, five-minute Redis seat locks,
 durable booking confirmation, Redis Pub/Sub events, realtime WebSocket seat
 updates, asynchronous MongoDB audit logs, Firebase authentication support,
-role authorization, an admin bookings API, and Docker Compose setup.
-
-The final login, booking, and admin screens remain deferred to Phase 5.
+role authorization, a responsive booking UI, an admin bookings view, and
+Docker Compose setup.
 
 ## Technology
 
@@ -127,9 +126,29 @@ VITE_FIREBASE_APP_ID=
 
 The frontend foundation provides Google popup sign-in, sign-out, auth-state
 observation, current ID-token retrieval, and an API client that attaches a
-fresh bearer token. Tokens are not written to `localStorage`. Development
-builds use `VITE_DEV_USER_ID` and `VITE_DEV_USER_ROLE` only for explicit local
-requests.
+fresh bearer token. Tokens are not written to `localStorage`.
+
+## Frontend Flow
+
+The default development build opens a local-auth login panel. Enter a user ID,
+then continue as `USER` or `ADMIN`; the session remains in memory only.
+Firebase mode instead presents Google sign-in and derives the displayed role
+from the verified token result. Backend authorization remains authoritative.
+
+After login:
+
+1. The first seeded showtime and its authoritative seat map load.
+2. The browser connects to the showtime WebSocket room and reloads the map
+   after every connection or reconnection.
+3. Selecting an available seat creates one five-minute lock and shows a
+   server-time-based countdown.
+4. The user can release the lock or confirm mock payment.
+5. Confirmed bookings appear under **My Bookings**.
+6. An `ADMIN` session can list bookings and filter by exact user ID.
+
+Realtime messages update other open browsers without refresh. Duplicate event
+IDs and older revisions are ignored, while valid equal-revision transitions
+such as `LOCKED` followed by `BOOKED` are applied.
 
 Errors use:
 
@@ -421,9 +440,8 @@ docs/                       Assignment and architecture notes
 - Development headers are not secure authentication and must not be used in production.
 - Firebase administrator claims are provisioned outside this application.
 - No notification delivery or database-backed user management.
-- The Vue screen remains the infrastructure status page; booking UI is Phase 5.
-- The Phase 5 login screen, route guards, seat map, lock countdown, mock
-  payment screen, and admin table are not implemented.
+- The frontend uses a simple tabbed shell rather than a router or global state library.
+- Development authentication sessions are intentionally memory-only.
 - Payment is the mock confirmation action.
 - Redis/MongoDB confirmation is not a cross-system transaction.
 - A failed post-commit Redis `BOOKED` transition has no reconciliation worker;

@@ -1,138 +1,134 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-type ServiceStatus = {
-  status: string
-}
+import { listShowtimes } from './api/cinema'
+import { authMode } from './auth/config'
+import { observeAuthState, signOut as firebaseSignOut } from './auth/firebase'
+import { authSession } from './auth/session'
+import AdminBookings from './components/AdminBookings.vue'
+import BookingPanel from './components/BookingPanel.vue'
+import LoginPanel from './components/LoginPanel.vue'
+import MyBookings from './components/MyBookings.vue'
+import type { Booking, ShowtimeSummary } from './types/cinema'
 
-type HealthResponse = {
-  status: string
-  services: Record<string, ServiceStatus>
-}
+type Tab = 'booking' | 'mine' | 'admin'
 
-const health = ref<HealthResponse | null>(null)
-const error = ref('')
+const tab = ref<Tab>('booking')
+const showtimes = ref<ShowtimeSummary[]>([])
+const selectedId = ref('')
+const loadingCatalog = ref(false)
+const catalogError = ref('')
+const flash = ref('')
+const bookingsRefresh = ref(0)
+let stopAuthObserver: (() => void) | null = null
 
-onMounted(async () => {
+async function loadCatalog() {
+  loadingCatalog.value = true
+  catalogError.value = ''
   try {
-    const response = await fetch('/api/health')
-    const body = (await response.json()) as HealthResponse
-    health.value = body
-
-    if (!response.ok) {
-      error.value = 'One or more backend dependencies are unavailable.'
+    showtimes.value = await listShowtimes()
+    if (!selectedId.value && showtimes.value.length) {
+      selectedId.value = showtimes.value[0].showtime.id
     }
   } catch {
-    error.value = 'The backend health endpoint is unavailable.'
+    catalogError.value = 'Showtimes could not be loaded.'
+  } finally {
+    loadingCatalog.value = false
+  }
+}
+
+function signedIn() {
+  flash.value = ''
+  tab.value = 'booking'
+  void loadCatalog()
+}
+
+function confirmed(_booking: Booking) {
+  bookingsRefresh.value++
+  flash.value = 'Booking confirmed. It is now available in My Bookings.'
+}
+
+function signedOut(message = '') {
+  authSession.signOut()
+  tab.value = 'booking'
+  flash.value = message
+}
+
+async function logout() {
+  if (authMode === 'firebase') {
+    await firebaseSignOut()
+  }
+  signedOut()
+}
+
+onMounted(() => {
+  void loadCatalog()
+  if (authMode === 'firebase') {
+    stopAuthObserver = observeAuthState(async (user) => {
+      try {
+        if (!user) {
+          authSession.signOut()
+          authSession.setReady()
+          return
+        }
+        const result = await user.getIdTokenResult()
+        authSession.signInFirebase(
+          user.uid,
+          result.claims.role === 'ADMIN' ? 'ADMIN' : 'USER',
+          user.displayName || '',
+          user.email || '',
+        )
+      } catch {
+        authSession.signOut()
+        authSession.setReady()
+        flash.value = 'Your sign-in session could not be verified. Please sign in again.'
+      }
+    })
   }
 })
+onBeforeUnmount(() => stopAuthObserver?.())
 </script>
 
 <template>
-  <main>
-    <section class="card">
-      <p class="eyebrow">Phase 1</p>
-      <h1>Cinema Ticket Booking</h1>
-      <p class="intro">
-        The Vue frontend and Go API are running. Booking features arrive in later phases.
-      </p>
-
-      <div class="health">
-        <h2>System health</h2>
-        <p v-if="!health && !error">Checking services...</p>
-        <p v-if="error" class="error">{{ error }}</p>
-        <ul v-if="health">
-          <li v-for="(service, name) in health.services" :key="name">
-            <span>{{ name }}</span>
-            <strong :class="service.status">{{ service.status }}</strong>
-          </li>
-        </ul>
+  <LoginPanel v-if="authSession.state.ready && !authSession.state.authenticated" @signed-in="signedIn" />
+  <main v-else-if="!authSession.state.ready" class="centered"><p>Checking authentication...</p></main>
+  <div v-else class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Cinema Ticket Booking</p>
+        <strong>{{ authSession.state.displayName || authSession.state.userId }}</strong>
+        <span v-if="authSession.state.email" class="muted"> / {{ authSession.state.email }}</span>
       </div>
-    </section>
-  </main>
+      <div class="account-actions">
+        <span class="role-badge">{{ authSession.state.role }}</span>
+        <span v-if="authMode === 'development'" class="dev-badge">Local auth</span>
+        <button class="text-button" @click="logout">Sign out</button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Application sections">
+      <button :class="{ active: tab === 'booking' }" @click="tab = 'booking'">Booking</button>
+      <button :class="{ active: tab === 'mine' }" @click="tab = 'mine'">My Bookings</button>
+      <button v-if="authSession.isAdmin.value" :class="{ active: tab === 'admin' }" @click="tab = 'admin'">
+        Admin
+      </button>
+    </nav>
+
+    <p v-if="flash" class="notice success shell-notice">{{ flash }}</p>
+    <p v-if="loadingCatalog" class="muted content">Loading showtimes...</p>
+    <p v-else-if="catalogError" class="notice error content">{{ catalogError }}</p>
+    <p v-else-if="!showtimes.length" class="muted content">No showtimes are available.</p>
+    <div v-else class="content">
+      <BookingPanel
+        v-if="tab === 'booking'"
+        :showtimes="showtimes"
+        :selected-id="selectedId"
+        @select-showtime="selectedId = $event"
+        @confirmed="confirmed"
+        @signed-out="signedOut"
+      />
+      <MyBookings v-else-if="tab === 'mine'" :key="bookingsRefresh" :refresh-key="bookingsRefresh" />
+      <AdminBookings v-else-if="tab === 'admin' && authSession.isAdmin.value" />
+    </div>
+  </div>
 </template>
-
-<style scoped>
-main {
-  display: grid;
-  min-height: 100vh;
-  place-items: center;
-  padding: 2rem;
-}
-
-.card {
-  width: min(100%, 42rem);
-  padding: 2.5rem;
-  border: 1px solid #29354d;
-  border-radius: 1rem;
-  background: #151d2d;
-  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 25%);
-}
-
-.eyebrow {
-  margin: 0 0 0.5rem;
-  color: #8da9ff;
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-h1,
-h2 {
-  margin-top: 0;
-}
-
-h1 {
-  margin-bottom: 1rem;
-  font-size: clamp(2rem, 6vw, 3.5rem);
-  line-height: 1;
-}
-
-.intro {
-  color: #b8c1d9;
-  line-height: 1.6;
-}
-
-.health {
-  margin-top: 2rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid #29354d;
-}
-
-.health h2 {
-  font-size: 1rem;
-}
-
-ul {
-  display: grid;
-  gap: 0.75rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  text-transform: capitalize;
-}
-
-strong {
-  padding: 0.25rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-}
-
-.up {
-  color: #78e0aa;
-  background: #123b2c;
-}
-
-.down,
-.error {
-  color: #ff9b9b;
-}
-</style>
