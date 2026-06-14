@@ -148,7 +148,7 @@ func TestOwnershipVerificationDoesNotExtendExpiry(t *testing.T) {
 	originalExpiry := locks.expiry("showtime-1", "A1")
 
 	now = now.Add(time.Minute)
-	result, err := locks.VerifyOwnership(context.Background(), lock)
+	result, _, err := locks.VerifyOwnership(context.Background(), lock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestConfirmReturnsBookingWhenLockCleanupFails(t *testing.T) {
 	if confirmed.Status != BookingStatusConfirmed || bookings.count() != 1 {
 		t.Fatalf("confirmed = %#v, booking count = %d", confirmed, bookings.count())
 	}
-	if !strings.Contains(logs.String(), "seat lock cleanup failed") {
+	if !strings.Contains(logs.String(), "Redis BOOKED transition failed") {
 		t.Fatalf("cleanup log = %q", logs.String())
 	}
 	if strings.Contains(logs.String(), lock.OwnershipToken) || strings.Contains(logs.String(), "secret") {
@@ -241,10 +241,9 @@ func TestCommittedBookingWithFailedCleanupCannotExpireToAvailable(t *testing.T) 
 	processor := events.NewExpirationProcessor(
 		bookings,
 		expirations,
-		"cinema.events",
 		log.New(&bytes.Buffer{}, "", 0),
 	)
-	processor.Process(context.Background(), "seat_lock:showtime-1:A1")
+	processor.Process(context.Background(), "seat_lock_expiry:showtime-1:A1:1")
 
 	if expirations.calls != 0 {
 		t.Fatalf("expiration publish calls = %d, want 0", expirations.calls)
@@ -399,11 +398,8 @@ type fakeExpirationPublisher struct {
 	availableUpdates int
 }
 
-func (p *fakeExpirationPublisher) PublishIfUnlocked(
-	context.Context,
-	string,
-	string,
-	events.DomainEvent,
+func (p *fakeExpirationPublisher) PublishExpiration(
+	context.Context, string, string, int64, events.DomainEvent,
 ) (bool, error) {
 	p.calls++
 	p.timeoutAudits++
@@ -476,20 +472,33 @@ type fakeLocks struct {
 	mu         sync.Mutex
 	items      map[string]fakeLockEntry
 	now        func() time.Time
+	generation int64
+	publisher  events.Publisher
 	verifyErr  error
 	releaseErr error
 }
 
-func (f *fakeLocks) Acquire(_ context.Context, lock SeatLock, ttl time.Duration) (bool, error) {
+func (f *fakeLocks) Acquire(
+	ctx context.Context,
+	lock SeatLock,
+	ttl time.Duration,
+	event events.DomainEvent,
+) (bool, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeExpired()
 	key := lockKey(lock.ShowtimeID, lock.SeatNo)
 	if _, exists := f.items[key]; exists {
-		return false, nil
+		return false, 0, nil
 	}
+	f.generation++
+	lock.Generation = f.generation
 	f.items[key] = fakeLockEntry{lock: lock, expiresAt: f.now().Add(ttl)}
-	return true, nil
+	event.Generation = lock.Generation
+	if f.publisher != nil {
+		_ = f.publisher.Publish(ctx, event)
+	}
+	return true, lock.Generation, nil
 }
 
 func (f *fakeLocks) Get(_ context.Context, showtimeID, seatNo string) (*SeatLock, error) {
@@ -517,25 +526,32 @@ func (f *fakeLocks) GetMany(_ context.Context, showtimeID string, seatNos []stri
 	return result, nil
 }
 
-func (f *fakeLocks) VerifyOwnership(_ context.Context, lock SeatLock) (OwnershipResult, error) {
+func (f *fakeLocks) VerifyOwnership(
+	_ context.Context,
+	lock SeatLock,
+) (OwnershipResult, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.verifyErr != nil {
-		return OwnershipMissing, f.verifyErr
+		return OwnershipMissing, 0, f.verifyErr
 	}
 	f.removeExpired()
 	key := lockKey(lock.ShowtimeID, lock.SeatNo)
 	entry, exists := f.items[key]
 	if !exists {
-		return OwnershipMissing, nil
+		return OwnershipMissing, 0, nil
 	}
 	if entry.lock.UserID != lock.UserID || entry.lock.OwnershipToken != lock.OwnershipToken {
-		return OwnershipNotMatched, nil
+		return OwnershipNotMatched, 0, nil
 	}
-	return OwnershipMatched, nil
+	return OwnershipMatched, entry.lock.Generation, nil
 }
 
-func (f *fakeLocks) Release(_ context.Context, lock SeatLock) (ReleaseResult, error) {
+func (f *fakeLocks) Release(
+	ctx context.Context,
+	lock SeatLock,
+	event events.DomainEvent,
+) (ReleaseResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.releaseErr != nil {
@@ -551,12 +567,50 @@ func (f *fakeLocks) Release(_ context.Context, lock SeatLock) (ReleaseResult, er
 		return ReleaseNotOwned, nil
 	}
 	delete(f.items, key)
+	event.Generation = entry.lock.Generation
+	if f.publisher != nil {
+		_ = f.publisher.Publish(ctx, event)
+	}
 	return ReleaseSucceeded, nil
+}
+
+func (f *fakeLocks) Confirm(
+	ctx context.Context,
+	lock SeatLock,
+	event events.DomainEvent,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	key := lockKey(lock.ShowtimeID, lock.SeatNo)
+	generation := lock.Generation
+	if entry, exists := f.items[key]; exists {
+		if entry.lock.Generation > generation {
+			generation = entry.lock.Generation
+		}
+		delete(f.items, key)
+	}
+	if generation == 0 {
+		generation = f.generation
+	}
+	event.Generation = generation
+	if f.publisher != nil {
+		return f.publisher.Publish(ctx, event)
+	}
+	return nil
 }
 
 func (f *fakeLocks) put(lock SeatLock, ttl time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if lock.Generation == 0 {
+		f.generation++
+		lock.Generation = f.generation
+	} else if lock.Generation > f.generation {
+		f.generation = lock.Generation
+	}
 	f.items[lockKey(lock.ShowtimeID, lock.SeatNo)] = fakeLockEntry{
 		lock: lock, expiresAt: f.now().Add(ttl),
 	}

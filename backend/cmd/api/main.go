@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -25,16 +26,23 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("application stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load configuration: %v", err)
+		return fmt.Errorf("load configuration: %w", err)
 	}
 
 	mongoStartupCtx, cancelMongoStartup := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
 	mongoClient, err := mongodb.Connect(mongoStartupCtx, cfg.MongoURI)
 	cancelMongoStartup()
 	if err != nil {
-		log.Fatalf("connect to MongoDB: %v", err)
+		return fmt.Errorf("connect to MongoDB: %w", err)
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
@@ -48,7 +56,7 @@ func main() {
 	redisClient, err := redisclient.Connect(redisStartupCtx, cfg.RedisURI)
 	cancelRedisStartup()
 	if err != nil {
-		log.Fatalf("connect to Redis: %v", err)
+		return fmt.Errorf("connect to Redis: %w", err)
 	}
 	defer func() {
 		if err := redisClient.Close(); err != nil {
@@ -66,11 +74,11 @@ func main() {
 	initializeCtx, cancelInitialize := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := bookingRepository.Initialize(initializeCtx); err != nil {
 		cancelInitialize()
-		log.Fatalf("initialize booking persistence: %v", err)
+		return fmt.Errorf("initialize booking persistence: %w", err)
 	}
 	if err := auditRepository.Initialize(initializeCtx); err != nil {
 		cancelInitialize()
-		log.Fatalf("initialize audit persistence: %v", err)
+		return fmt.Errorf("initialize audit persistence: %w", err)
 	}
 	cancelInitialize()
 
@@ -78,7 +86,7 @@ func main() {
 	defer cancelApp()
 
 	eventPublisher := events.NewRedisPublisher(redisClient.Raw(), cfg.EventChannel)
-	lockRepository := booking.NewRedisLockRepository(redisClient.Raw())
+	lockRepository := booking.NewRedisLockRepository(redisClient.Raw(), cfg.EventChannel)
 	bookingService := booking.NewService(
 		bookingRepository,
 		bookingRepository,
@@ -106,8 +114,7 @@ func main() {
 	)
 	expirationProcessor := events.NewExpirationProcessor(
 		bookingRepository,
-		events.NewRedisExpirationPublisher(redisClient.Raw()),
-		cfg.EventChannel,
+		lockRepository,
 		log.Default(),
 	)
 	expirationListener := events.NewExpirationListener(
@@ -122,9 +129,8 @@ func main() {
 		{Name: "lock expiration listener", Run: expirationListener.Run},
 	})
 	if err != nil {
-		log.Printf("start background workers: %v", err)
 		hub.Shutdown()
-		return
+		return fmt.Errorf("start background workers: %w", err)
 	}
 	go func() {
 		for workerError := range workers.Errors() {
@@ -158,10 +164,11 @@ func main() {
 
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+	var runErr error
 	select {
 	case <-shutdownSignal:
 	case err := <-serverErrors:
-		log.Printf("HTTP server stopped with error: %v", err)
+		runErr = fmt.Errorf("HTTP server stopped: %w", err)
 	}
 
 	cancelApp()
@@ -173,4 +180,5 @@ func main() {
 		log.Printf("shutdown HTTP server: %v", err)
 	}
 	workers.Wait()
+	return runErr
 }

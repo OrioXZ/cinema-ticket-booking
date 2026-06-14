@@ -19,6 +19,7 @@ func TestEventJSONRoundTrip(t *testing.T) {
 		"booking-1",
 		"",
 		time.Date(2026, time.June, 14, 12, 0, 0, 0, time.FixedZone("test", 3600)),
+		1,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestEventJSONRoundTrip(t *testing.T) {
 	}
 	if decoded.ID != original.ID || decoded.Type != BookingConfirmed ||
 		decoded.ShowtimeID != "showtime-1" || decoded.SeatNo != "A1" ||
-		decoded.OccurredAt.Location() != time.UTC {
+		decoded.Generation != 1 || decoded.OccurredAt.Location() != time.UTC {
 		t.Fatalf("decoded event = %#v", decoded)
 	}
 }
@@ -49,6 +50,11 @@ func TestMalformedEventIsRejected(t *testing.T) {
 		`{"version":1,"id":"event","type":"unknown","occurred_at":"2026-06-14T12:00:00Z","showtime_id":"showtime-1","seat_no":"A1"}`,
 	)); err == nil {
 		t.Fatal("Unmarshal() expected unknown event type error")
+	}
+	if _, err := Unmarshal([]byte(
+		`{"version":1,"id":"event","type":"seat.locked","occurred_at":"2026-06-14T12:00:00Z","showtime_id":"showtime-1","seat_no":"A1"}`,
+	)); err == nil {
+		t.Fatal("Unmarshal() expected missing generation error")
 	}
 }
 
@@ -75,17 +81,26 @@ func TestSubscriberStopsOnCanceledContext(t *testing.T) {
 	}
 }
 
-func TestParseSeatLockKey(t *testing.T) {
-	showtime, seat, matched, valid := parseSeatLockKey("seat_lock:showtime-1:a1")
-	if showtime != "showtime-1" || seat != "A1" || !matched || !valid {
-		t.Fatalf("parseSeatLockKey() = %q, %q, %v, %v", showtime, seat, matched, valid)
+func TestParseExpirationMarkerKey(t *testing.T) {
+	showtime, seat, generation, matched, valid := parseExpirationMarkerKey(
+		"seat_lock_expiry:showtime-1:a1:42",
+	)
+	if showtime != "showtime-1" || seat != "A1" || generation != 42 || !matched || !valid {
+		t.Fatalf(
+			"parseExpirationMarkerKey() = %q, %q, %d, %v, %v",
+			showtime,
+			seat,
+			generation,
+			matched,
+			valid,
+		)
 	}
-	_, _, matched, valid = parseSeatLockKey("unrelated:key")
+	_, _, _, matched, valid = parseExpirationMarkerKey("unrelated:key")
 	if matched || valid {
 		t.Fatal("unrelated key matched")
 	}
-	_, _, matched, valid = parseSeatLockKey("seat_lock:broken")
+	_, _, _, matched, valid = parseExpirationMarkerKey("seat_lock_expiry:broken")
 	if !matched || valid {
-		t.Fatal("malformed seat-lock key was not identified")
+		t.Fatal("malformed seat-lock marker was not identified")
 	}
 }

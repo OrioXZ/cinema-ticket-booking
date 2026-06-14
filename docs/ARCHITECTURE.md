@@ -25,8 +25,10 @@ remain deferred.
 
 ## Event Flow
 
-1. A booking operation completes its authoritative Redis or MongoDB transition.
-2. The service publishes a best-effort domain event to `cinema.events`.
+1. A Redis Lua script atomically performs each public seat-state transition and
+   publishes its event to `cinema.events`.
+2. MongoDB insertion remains the separate durable booking success boundary;
+   its subsequent Redis `BOOKED` transition is best effort.
 3. Independent Redis subscribers receive the same event.
 4. The audit subscriber inserts an idempotent `audit_logs` document.
 5. The realtime subscriber maps state changes to public `seat.updated` messages.
@@ -40,7 +42,7 @@ tokens, credentials, connection strings, and raw event payloads.
 The internal envelope is version `1` and contains:
 
 ```text
-version, id, type, occurred_at, showtime_id, seat_no,
+version, id, type, occurred_at, showtime_id, seat_no, generation,
 user_id, booking_id, reason
 ```
 
@@ -53,7 +55,8 @@ types:
 - `booking.confirmed`
 - `lock.acquisition_failed`
 
-Ownership tokens are never included.
+State-changing events require a positive generation. Ownership tokens are never
+included.
 
 ## Realtime Contract
 
@@ -66,7 +69,7 @@ GET /ws/showtimes/:showtimeId
 Public messages contain:
 
 ```text
-type=seat.updated, event_id, showtime_id, seat_no, state, occurred_at
+type=seat.updated, event_id, showtime_id, seat_no, state, revision, occurred_at
 ```
 
 Mappings:
@@ -106,21 +109,30 @@ Duplicate event IDs are treated as already processed.
 
 Redis enables keyevent expiration notifications with `Ex`. The backend
 subscribes to `__keyevent@<db>__:expired`, accepts only keys shaped as
-`seat_lock:{showtimeId}:{seatNo}`, and checks MongoDB's durable booking state.
-Booked seats stop there, so they produce no timeout audit and no public
-`AVAILABLE` update. For unbooked seats, one Redis Lua script atomically checks
-that the current lock key is absent and publishes `seat.lock_expired` through
-`cinema.events`. A newer lock present before the script runs suppresses the
-stale expiration event. Expiration notifications contain no former owner, so
-timeout events omit `user_id`.
+`seat_lock_expiry:{showtimeId}:{seatNo}:{generation}`. Markers expire one second
+after the five-minute lock. MongoDB's durable booking check is an early safety
+filter. The final Lua gate verifies the marker generation remains the active
+`LOCKED` generation, no lock exists, and realtime state is not terminal
+`BOOKED`; it then atomically stores `AVAILABLE` and publishes
+`seat.lock_expired`. Timeout events omit `user_id`.
+
+## Redis Seat State
+
+Each seat uses a lock key, persistent generation key, realtime-state hash, and
+generation-bearing expiration marker. Acquire, release, confirmation, and
+expiration are separate Lua transitions. Each script updates Redis state and
+publishes its public event atomically. Generations prevent delayed release or
+expiry work from overwriting a newer generation. `BOOKED` is terminal for
+Phase 3.
 
 ## Booking Correctness
 
 Phase 2 correctness remains unchanged. Redis lock ownership protects temporary
 selection, while MongoDB's unique `(showtime_id, seat_no)` index is the final
-double-booking barrier. Event publishing is outside that correctness boundary.
-MongoDB booking insertion remains the durable confirmation success point, and
-post-commit lock cleanup remains best effort.
+double-booking barrier. MongoDB booking insertion remains the durable
+confirmation success point. The post-commit Redis `BOOKED` transition and
+cleanup remain best effort; this is not a distributed transaction or
+cross-system atomicity guarantee.
 
 ## Lifecycle
 
@@ -134,7 +146,7 @@ Startup initializes MongoDB indexes and Redis before starting:
 Each Redis worker signals readiness only after Redis confirms its subscription.
 The application waits for all three signals with a bounded timeout before
 opening HTTP traffic. A pre-readiness failure cancels and joins all workers and
-returns through normal resource cleanup.
+returns through normal resource cleanup, then exits non-zero.
 
 Shutdown stops HTTP traffic, cancels the root worker context, closes WebSocket
 clients, waits for subscriptions to exit, then disconnects Redis and MongoDB.

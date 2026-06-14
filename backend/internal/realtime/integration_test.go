@@ -45,7 +45,7 @@ func TestWebSocketServerRooms(t *testing.T) {
 	event := events.DomainEvent{
 		Version: events.CurrentVersion, ID: "event-1", Type: events.SeatLocked,
 		OccurredAt: time.Now().UTC(), ShowtimeID: "showtime-1", SeatNo: "A1",
-		UserID: "private-user",
+		Generation: 1, UserID: "private-user",
 	}
 	if err := consumer.Handle(context.Background(), event); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,8 @@ func TestWebSocketServerRooms(t *testing.T) {
 		if err := json.Unmarshal(data, &update); err != nil {
 			t.Fatal(err)
 		}
-		if update.State != "LOCKED" || strings.Contains(string(data), "private-user") {
+		if update.State != "LOCKED" || update.Revision != 1 ||
+			strings.Contains(string(data), "private-user") {
 			t.Fatalf("public update = %s", data)
 		}
 	}

@@ -42,6 +42,10 @@ this development-only boundary with verified Firebase claims.
 - [x] Gate expiration events on durable booking state
 - [x] Atomically suppress stale expiration events when a newer lock exists
 - [x] Wait for Redis subscriber readiness before starting HTTP
+- [x] Add per-seat Redis generations and generation-bearing expiry markers
+- [x] Atomically combine public state transitions with event publication
+- [x] Make `BOOKED` terminal for Redis realtime state
+- [x] Exit non-zero after cleanup on startup failure
 - [x] Add focused unit, race, and integration tests
 
 ## Phase 4 - Authentication and authorization

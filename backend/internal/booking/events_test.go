@@ -152,6 +152,7 @@ func newEventTestService() (*Service, *fakeBookings, *fakeLocks, *recordingPubli
 	bookings := &fakeBookings{}
 	locks := &fakeLocks{items: make(map[string]fakeLockEntry), now: time.Now}
 	publisher := &recordingPublisher{}
+	locks.publisher = publisher
 	service := NewService(
 		catalog,
 		bookings,

@@ -97,7 +97,7 @@ func TestRedisEventProducesMongoAuditRecord(t *testing.T) {
 	}
 
 	event, err := events.New(
-		events.SeatReleased, "showtime-1", "A2", "user-1", "", "", time.Now(),
+		events.SeatReleased, "showtime-1", "A2", "user-1", "", "", time.Now(), 1,
 	)
 	if err != nil {
 		t.Fatal(err)

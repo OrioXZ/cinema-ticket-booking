@@ -36,7 +36,7 @@ func TestHubBroadcastsOnlyToMatchingRoom(t *testing.T) {
 func TestPublicProjectionDoesNotExposeUserID(t *testing.T) {
 	update, ok := Project(events.DomainEvent{
 		ID: "event-1", Type: events.SeatLocked, OccurredAt: time.Now(),
-		ShowtimeID: "showtime-1", SeatNo: "A1", UserID: "private-user",
+		ShowtimeID: "showtime-1", SeatNo: "A1", Generation: 42, UserID: "private-user",
 	})
 	if !ok {
 		t.Fatal("Project() did not produce update")
@@ -47,6 +47,9 @@ func TestPublicProjectionDoesNotExposeUserID(t *testing.T) {
 	}
 	if strings.Contains(string(data), "private-user") || strings.Contains(string(data), "user_id") {
 		t.Fatalf("public message exposed identity: %s", data)
+	}
+	if update.Revision != 42 {
+		t.Fatalf("revision = %d, want 42", update.Revision)
 	}
 }
 

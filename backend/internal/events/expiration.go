@@ -4,76 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 )
 
-var publishExpirationIfUnlockedScript = goredis.NewScript(`
-if redis.call("EXISTS", KEYS[1]) == 1 then
-	return 0
-end
-
-redis.call("PUBLISH", ARGV[1], ARGV[2])
-return 1
-`)
-
 type BookingStateReader interface {
 	IsBooked(context.Context, string, string) (bool, error)
 }
 
 type ExpirationPublisher interface {
-	PublishIfUnlocked(
+	PublishExpiration(
 		context.Context,
 		string,
 		string,
+		int64,
 		DomainEvent,
 	) (bool, error)
-}
-
-type RedisExpirationPublisher struct {
-	client goredis.UniversalClient
-}
-
-func NewRedisExpirationPublisher(client goredis.UniversalClient) *RedisExpirationPublisher {
-	return &RedisExpirationPublisher{client: client}
-}
-
-func (p *RedisExpirationPublisher) PublishIfUnlocked(
-	ctx context.Context,
-	lockKey string,
-	channel string,
-	event DomainEvent,
-) (bool, error) {
-	data, err := Marshal(event)
-	if err != nil {
-		return false, err
-	}
-	result, err := publishExpirationIfUnlockedScript.Run(
-		ctx,
-		p.client,
-		[]string{lockKey},
-		channel,
-		string(data),
-	).Int()
-	if err != nil {
-		return false, err
-	}
-	switch result {
-	case 0:
-		return false, nil
-	case 1:
-		return true, nil
-	default:
-		return false, fmt.Errorf("unexpected expiration publish result")
-	}
 }
 
 type ExpirationProcessor struct {
 	bookings  BookingStateReader
 	publisher ExpirationPublisher
-	channel   string
 	logger    Logger
 	now       func() time.Time
 }
@@ -81,21 +35,20 @@ type ExpirationProcessor struct {
 func NewExpirationProcessor(
 	bookings BookingStateReader,
 	publisher ExpirationPublisher,
-	channel string,
 	logger Logger,
 ) *ExpirationProcessor {
 	return &ExpirationProcessor{
-		bookings: bookings, publisher: publisher, channel: channel, logger: logger, now: time.Now,
+		bookings: bookings, publisher: publisher, logger: logger, now: time.Now,
 	}
 }
 
-func (p *ExpirationProcessor) Process(ctx context.Context, lockKey string) {
-	showtimeID, seatNo, matched, valid := parseSeatLockKey(lockKey)
+func (p *ExpirationProcessor) Process(ctx context.Context, markerKey string) {
+	showtimeID, seatNo, generation, matched, valid := parseExpirationMarkerKey(markerKey)
 	if !matched {
 		return
 	}
 	if !valid {
-		p.logger.Printf("ignored malformed expired seat-lock key")
+		p.logger.Printf("ignored malformed expired seat-lock marker")
 		return
 	}
 
@@ -112,7 +65,16 @@ func (p *ExpirationProcessor) Process(ctx context.Context, lockKey string) {
 		return
 	}
 
-	event, err := New(SeatLockExpired, showtimeID, seatNo, "", "", "lock expired", p.now())
+	event, err := New(
+		SeatLockExpired,
+		showtimeID,
+		seatNo,
+		"",
+		"",
+		"lock expired",
+		p.now(),
+		generation,
+	)
 	if err != nil {
 		p.logger.Printf(
 			"failed to create lock-expiration event for showtime %q seat %q",
@@ -121,7 +83,13 @@ func (p *ExpirationProcessor) Process(ctx context.Context, lockKey string) {
 		)
 		return
 	}
-	if _, err := p.publisher.PublishIfUnlocked(ctx, lockKey, p.channel, event); err != nil {
+	if _, err := p.publisher.PublishExpiration(
+		ctx,
+		showtimeID,
+		seatNo,
+		generation,
+		event,
+	); err != nil {
 		p.logger.Printf(
 			"failed to atomically publish lock-expiration event for showtime %q seat %q",
 			showtimeID,
@@ -174,13 +142,19 @@ func (l *ExpirationListener) Run(ctx context.Context, ready func()) error {
 	}
 }
 
-func parseSeatLockKey(key string) (showtimeID string, seatNo string, matched bool, valid bool) {
-	if !strings.HasPrefix(key, "seat_lock:") {
-		return "", "", false, false
+func parseExpirationMarkerKey(
+	key string,
+) (showtimeID string, seatNo string, generation int64, matched bool, valid bool) {
+	if !strings.HasPrefix(key, "seat_lock_expiry:") {
+		return "", "", 0, false, false
 	}
 	parts := strings.Split(key, ":")
-	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
-		return "", "", true, false
+	if len(parts) != 4 || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+		return "", "", 0, true, false
 	}
-	return parts[1], strings.ToUpper(parts[2]), true, true
+	generation, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || generation <= 0 {
+		return "", "", 0, true, false
+	}
+	return parts[1], strings.ToUpper(parts[2]), generation, true, true
 }

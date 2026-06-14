@@ -95,15 +95,26 @@ Invoke-RestMethod `
 Redis locks use:
 
 ```text
-key:   seat_lock:{showtimeId}:{seatNo}
-value: {"user_id":"...","ownership_token":"..."}
-TTL:   5 minutes
+seat_lock:{showtimeId}:{seatNo}
+seat_lock_generation:{showtimeId}:{seatNo}
+seat_realtime_state:{showtimeId}:{seatNo}
+seat_lock_expiry:{showtimeId}:{seatNo}:{generation}
 ```
 
-Acquisition uses Redis `SET NX` with expiration. Ownership tokens contain 256
-random bits from `crypto/rand`; user ID alone cannot release or confirm a lock.
-Release uses one Lua compare-and-delete operation. Seat maps use `MGET` for the
-configured seats and never use Redis `KEYS`.
+The lock value contains the user ID, ownership token, and an internal
+generation. The REST response omits generation. Locks keep the five-minute TTL;
+the generation-bearing expiry marker lasts one additional second so Redis has
+removed the real lock before timeout processing begins. Ownership tokens
+contain 256 random bits from `crypto/rand`; user ID alone cannot release or
+confirm a lock. Seat maps use `MGET` for configured seats and never use Redis
+`KEYS`.
+
+Redis Lua scripts atomically combine each public state mutation with its
+Pub/Sub event. Acquire stores `LOCKED`; release stores `AVAILABLE`;
+confirmation stores terminal `BOOKED`; true expiration stores `AVAILABLE`.
+An old release or expiry generation cannot overwrite a newer lock. After
+`BOOKED`, later acquire, release, and expiration scripts cannot publish
+`LOCKED` or `AVAILABLE`.
 
 Confirmation validates the showtime and seat and atomically compares both lock
 owner fields without changing the lock's remaining TTL. A correct owner can
@@ -112,12 +123,11 @@ refresh it. MongoDB then inserts the `CONFIRMED` booking. Its unique compound
 index on `(showtime_id, seat_no)` is the final double-booking barrier, and
 duplicate keys return HTTP `409`.
 
-Successful MongoDB insertion is the durable success boundary. Redis lock
-release afterward is best effort: a cleanup error is logged and the API still
-returns the confirmed booking. The remaining lock may temporarily appear until
-its original TTL expires. Redis and MongoDB do not share a transaction, but
-these cases cannot permit two durable bookings because the MongoDB unique index
-remains authoritative.
+Successful MongoDB insertion is the durable success boundary. The post-commit
+Redis `BOOKED` transition and lock cleanup are best effort: an error is logged
+and the API still returns the confirmed booking. Redis and MongoDB do not share
+a transaction, so this is not cross-system atomicity. These failures cannot
+permit two durable bookings because MongoDB remains authoritative.
 
 ## Realtime Events
 
@@ -132,6 +142,7 @@ Phase 3 publishes a versioned internal event envelope to Redis channel
   "occurred_at": "2026-06-14T12:00:00Z",
   "showtime_id": "showtime-1",
   "seat_no": "A1",
+  "generation": 42,
   "user_id": "user-1",
   "booking_id": "",
   "reason": ""
@@ -149,6 +160,9 @@ Event types are:
 Publishing and consumption are best effort. Redis Pub/Sub is non-durable, so
 events may be missed while the application or client is offline. REST booking
 and lock correctness remains authoritative.
+
+State-changing events require a positive generation.
+`lock.acquisition_failed` may omit it because no state transition occurred.
 
 Two Redis subscribers consume `cinema.events` independently:
 
@@ -171,23 +185,26 @@ Public messages never contain user identity:
   "showtime_id": "showtime-1",
   "seat_no": "A1",
   "state": "LOCKED",
+  "revision": 42,
   "occurred_at": "2026-06-14T12:00:00Z"
 }
 ```
 
-Possible public states are `LOCKED`, `AVAILABLE`, and `BOOKED`. After connecting
-or reconnecting, clients must reload the REST seat map because Pub/Sub and
-WebSocket delivery are transient.
+Possible public states are `LOCKED`, `AVAILABLE`, and `BOOKED`. Revision is the
+Redis seat generation and allows clients to ignore duplicate or older
+messages. After connecting or reconnecting, clients must reload the REST seat
+map because Pub/Sub and WebSocket delivery are transient.
 
 ## Lock Expiration
 
 Redis runs with `notify-keyspace-events Ex`. The backend subscribes to
-`__keyevent@0__:expired`, filters `seat_lock:{showtimeId}:{seatNo}` keys, and
-checks MongoDB before publishing: a durably booked seat never produces a
-timeout audit or `AVAILABLE` update. For an unbooked seat, one Redis Lua script
-atomically checks that no current lock exists and publishes
-`seat.lock_expired`. A stale notification therefore cannot overwrite a newer
-lock, and a committed booking cannot be broadcast as available.
+`__keyevent@0__:expired` and filters
+`seat_lock_expiry:{showtimeId}:{seatNo}:{generation}` markers. MongoDB is an
+early durable-booking safety check. The final Redis Lua gate requires the same
+generation to remain `LOCKED`, no current lock, and a non-`BOOKED` realtime
+state before atomically storing `AVAILABLE` and publishing
+`seat.lock_expired`. Marker expiry adds roughly one second to realtime timeout
+notification. Stale markers cannot overwrite a newer lock or booking.
 
 Expiration events can still be missed while the backend is offline because
 Redis Pub/Sub and keyspace notifications are non-durable. Clients reload the
@@ -221,7 +238,8 @@ Duplicate event delivery is idempotent by `event_id`.
 The backend owns a root application context for the HTTP server, audit
 subscriber, realtime subscriber, and expiration listener. HTTP starts only
 after Redis confirms all three subscriptions; startup has a bounded timeout
-and cancels and joins every worker on failure. Shutdown stops HTTP traffic,
+and cancels and joins every worker on failure. Startup failures run deferred
+MongoDB and Redis cleanup and exit non-zero. Shutdown stops HTTP traffic,
 cancels subscriptions, closes WebSocket clients, waits for workers, and only
 then closes Redis and MongoDB. Pub/Sub remains non-durable after readiness.
 
@@ -327,6 +345,6 @@ docs/                       Assignment and architecture notes
 - The Vue screen remains the infrastructure status page; booking UI is Phase 5.
 - Payment is the mock confirmation action.
 - Redis/MongoDB confirmation is not a cross-system transaction.
-- Post-commit Redis cleanup has no reconciliation worker yet; an owned lock may
-  remain visible until its original TTL expires.
+- A failed post-commit Redis `BOOKED` transition has no reconciliation worker;
+  the REST seat map still resolves the durable MongoDB booking as `BOOKED`.
 - Redis Pub/Sub, WebSocket updates, and expiration notifications are transient.

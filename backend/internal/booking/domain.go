@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 )
 
 const (
@@ -67,6 +69,7 @@ type SeatLock struct {
 	UserID         string    `json:"user_id"`
 	OwnershipToken string    `json:"ownership_token"`
 	ExpiresAt      time.Time `json:"expires_at"`
+	Generation     int64     `json:"-"`
 }
 
 type Seat struct {
@@ -103,9 +106,10 @@ type BookingRepository interface {
 }
 
 type LockRepository interface {
-	Acquire(context.Context, SeatLock, time.Duration) (bool, error)
+	Acquire(context.Context, SeatLock, time.Duration, events.DomainEvent) (bool, int64, error)
 	Get(context.Context, string, string) (*SeatLock, error)
 	GetMany(context.Context, string, []string) (map[string]SeatLock, error)
-	VerifyOwnership(context.Context, SeatLock) (OwnershipResult, error)
-	Release(context.Context, SeatLock) (ReleaseResult, error)
+	VerifyOwnership(context.Context, SeatLock) (OwnershipResult, int64, error)
+	Release(context.Context, SeatLock, events.DomainEvent) (ReleaseResult, error)
+	Confirm(context.Context, SeatLock, events.DomainEvent) error
 }

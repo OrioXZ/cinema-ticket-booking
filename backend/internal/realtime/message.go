@@ -17,6 +17,7 @@ type SeatUpdate struct {
 	ShowtimeID string    `json:"showtime_id"`
 	SeatNo     string    `json:"seat_no"`
 	State      string    `json:"state"`
+	Revision   int64     `json:"revision"`
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
@@ -38,6 +39,7 @@ func Project(event events.DomainEvent) (SeatUpdate, bool) {
 		ShowtimeID: event.ShowtimeID,
 		SeatNo:     event.SeatNo,
 		State:      state,
+		Revision:   event.Generation,
 		OccurredAt: event.OccurredAt.UTC(),
 	}, true
 }

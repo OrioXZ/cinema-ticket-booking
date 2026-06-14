@@ -48,11 +48,17 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, seatNo := range []string{"A1", "A2"} {
-		redisClient.Del(ctx, lockKey("showtime-1", seatNo))
-		defer redisClient.Del(context.Background(), lockKey("showtime-1", seatNo))
+		keys := []string{
+			lockKey("showtime-1", seatNo),
+			generationKey("showtime-1", seatNo),
+			realtimeStateKey("showtime-1", seatNo),
+		}
+		redisClient.Del(ctx, keys...)
+		defer redisClient.Del(context.Background(), keys...)
 	}
 
-	lockRepository := NewRedisLockRepository(redisClient)
+	channel := fmt.Sprintf("cinema.events.concurrency.%d", time.Now().UnixNano())
+	lockRepository := NewRedisLockRepository(redisClient, channel)
 	service := NewService(
 		repository,
 		repository,
@@ -116,7 +122,7 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 	}
 }
 
-func TestRealRedisOwnershipAndTTL(t *testing.T) {
+func TestRealRedisGenerationTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -127,16 +133,27 @@ func TestRealRedisOwnershipAndTTL(t *testing.T) {
 	redisClient := goredis.NewClient(redisOptions)
 	defer redisClient.Close()
 
-	repository := NewRedisLockRepository(redisClient)
+	channel := fmt.Sprintf("cinema.events.transitions.%d", time.Now().UnixNano())
+	subscription := redisClient.Subscribe(ctx, channel)
+	defer subscription.Close()
+	if _, err := subscription.Receive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	messages := subscription.Channel()
+	repository := NewRedisLockRepository(redisClient, channel)
 	showtimeID := "integration-ownership"
 	seatNos := []string{"A1", "A2"}
 	for _, seatNo := range seatNos {
-		key := lockKey(showtimeID, seatNo)
-		if err := redisClient.Del(ctx, key).Err(); err != nil {
+		keys := []string{
+			lockKey(showtimeID, seatNo),
+			generationKey(showtimeID, seatNo),
+			realtimeStateKey(showtimeID, seatNo),
+		}
+		if err := redisClient.Del(ctx, keys...).Err(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_ = redisClient.Del(context.Background(), key).Err()
+			_ = redisClient.Del(context.Background(), keys...).Err()
 		})
 	}
 
@@ -147,9 +164,20 @@ func TestRealRedisOwnershipAndTTL(t *testing.T) {
 		UserID:         "user-1",
 		OwnershipToken: "original-token",
 	}
-	acquired, err := repository.Acquire(ctx, original, shortTTL)
+	acquired, generation, err := repository.Acquire(
+		ctx,
+		original,
+		shortTTL,
+		transitionEvent(t, events.SeatLocked, original, ""),
+	)
 	if err != nil || !acquired {
-		t.Fatalf("Acquire() = %v, %v", acquired, err)
+		t.Fatalf("Acquire() = %v, %d, %v", acquired, generation, err)
+	}
+	original.Generation = generation
+	assertTransition(t, messages, events.SeatLocked, generation)
+	markerKey := expirationMarkerPrefix(showtimeID, "A1") + fmt.Sprint(generation)
+	if exists, err := redisClient.Exists(ctx, markerKey).Result(); err != nil || exists != 1 {
+		t.Fatalf("expiration marker exists = %d, %v", exists, err)
 	}
 	beforeWrongOwnership, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
 	if err != nil {
@@ -158,15 +186,19 @@ func TestRealRedisOwnershipAndTTL(t *testing.T) {
 
 	wrongToken := original
 	wrongToken.OwnershipToken = "wrong-token"
-	if result, err := repository.Release(ctx, wrongToken); err != nil || result != ReleaseNotOwned {
+	if result, err := repository.Release(
+		ctx,
+		wrongToken,
+		transitionEvent(t, events.SeatReleased, wrongToken, ""),
+	); err != nil || result != ReleaseNotOwned {
 		t.Fatalf("wrong-token Release() = %v, %v", result, err)
 	}
 	wrongUser := original
 	wrongUser.UserID = "user-2"
-	if result, err := repository.VerifyOwnership(ctx, wrongUser); err != nil || result != OwnershipNotMatched {
+	if result, _, err := repository.VerifyOwnership(ctx, wrongUser); err != nil || result != OwnershipNotMatched {
 		t.Fatalf("wrong-user VerifyOwnership() = %v, %v", result, err)
 	}
-	if result, err := repository.VerifyOwnership(ctx, wrongToken); err != nil || result != OwnershipNotMatched {
+	if result, _, err := repository.VerifyOwnership(ctx, wrongToken); err != nil || result != OwnershipNotMatched {
 		t.Fatalf("wrong-token VerifyOwnership() = %v, %v", result, err)
 	}
 	afterWrongOwnership, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
@@ -186,7 +218,8 @@ func TestRealRedisOwnershipAndTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if result, err := repository.VerifyOwnership(ctx, original); err != nil || result != OwnershipMatched {
+	if result, verifiedGeneration, err := repository.VerifyOwnership(ctx, original); err != nil ||
+		result != OwnershipMatched || verifiedGeneration != generation {
 		t.Fatalf("matching VerifyOwnership() = %v, %v", result, err)
 	}
 	after, err := redisClient.PTTL(ctx, lockKey(showtimeID, "A1")).Result()
@@ -197,39 +230,163 @@ func TestRealRedisOwnershipAndTTL(t *testing.T) {
 		t.Fatalf("PTTL after verification = %v, want positive and less than %v", after, before)
 	}
 
-	if result, err := repository.Release(ctx, original); err != nil || result != ReleaseSucceeded {
+	if result, err := repository.Release(
+		ctx,
+		original,
+		transitionEvent(t, events.SeatReleased, original, ""),
+	); err != nil || result != ReleaseSucceeded {
 		t.Fatalf("matching Release() = %v, %v", result, err)
 	}
+	assertTransition(t, messages, events.SeatReleased, generation)
+	if exists, err := redisClient.Exists(ctx, markerKey).Result(); err != nil || exists != 0 {
+		t.Fatalf("released marker exists = %d, %v", exists, err)
+	}
+
 	newer := original
 	newer.OwnershipToken = "newer-token"
-	if acquired, err := repository.Acquire(ctx, newer, shortTTL); err != nil || !acquired {
+	acquired, newerGeneration, err := repository.Acquire(
+		ctx,
+		newer,
+		shortTTL,
+		transitionEvent(t, events.SeatLocked, newer, ""),
+	)
+	if err != nil || !acquired || newerGeneration <= generation {
 		t.Fatalf("newer Acquire() = %v, %v", acquired, err)
 	}
-	if result, err := repository.Release(ctx, original); err != nil || result != ReleaseNotOwned {
+	newer.Generation = newerGeneration
+	assertTransition(t, messages, events.SeatLocked, newerGeneration)
+	if result, err := repository.Release(
+		ctx,
+		original,
+		transitionEvent(t, events.SeatReleased, original, ""),
+	); err != nil || result != ReleaseNotOwned {
 		t.Fatalf("stale-token Release() = %v, %v", result, err)
 	}
-	if result, err := repository.Release(ctx, newer); err != nil || result != ReleaseSucceeded {
-		t.Fatalf("newer-owner Release() = %v, %v", result, err)
+	if err := repository.Confirm(
+		ctx,
+		newer,
+		transitionEvent(t, events.BookingConfirmed, newer, "booking-1"),
+	); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	assertTransition(t, messages, events.BookingConfirmed, newerGeneration)
+	newerMarker := expirationMarkerPrefix(showtimeID, "A1") + fmt.Sprint(newerGeneration)
+	if count, err := redisClient.Exists(ctx, lockKey(showtimeID, "A1"), newerMarker).Result(); err != nil ||
+		count != 0 {
+		t.Fatalf("confirmed lock/marker count = %d, %v", count, err)
+	}
+	published, err := repository.PublishExpiration(
+		ctx,
+		showtimeID,
+		"A1",
+		generation,
+		transitionEvent(t, events.SeatLockExpired, original, ""),
+	)
+	if err != nil || published {
+		t.Fatalf("old expiration after newer BOOKED = %v, %v", published, err)
+	}
+
+	blocked := newer
+	blocked.OwnershipToken = "blocked-token"
+	if acquired, _, err := repository.Acquire(
+		ctx,
+		blocked,
+		shortTTL,
+		transitionEvent(t, events.SeatLocked, blocked, ""),
+	); err != nil || acquired {
+		t.Fatalf("acquire after BOOKED = %v, %v", acquired, err)
 	}
 
 	expiring := SeatLock{
-		ShowtimeID:     showtimeID,
-		SeatNo:         "A2",
-		UserID:         "user-1",
-		OwnershipToken: "expiring-token",
+		ShowtimeID: showtimeID, SeatNo: "A2", UserID: "user-1", OwnershipToken: "expiring-token",
 	}
-	if acquired, err := repository.Acquire(ctx, expiring, 150*time.Millisecond); err != nil || !acquired {
+	acquired, expiringGeneration, err := repository.Acquire(
+		ctx,
+		expiring,
+		shortTTL,
+		transitionEvent(t, events.SeatLocked, expiring, ""),
+	)
+	if err != nil || !acquired {
 		t.Fatalf("expiring Acquire() = %v, %v", acquired, err)
 	}
-	time.Sleep(250 * time.Millisecond)
-	replacement := expiring
-	replacement.UserID = "user-2"
-	replacement.OwnershipToken = "replacement-token"
-	if acquired, err := repository.Acquire(ctx, replacement, shortTTL); err != nil || !acquired {
-		t.Fatalf("post-expiry Acquire() = %v, %v", acquired, err)
+	expiring.Generation = expiringGeneration
+	assertTransition(t, messages, events.SeatLocked, expiringGeneration)
+	if err := redisClient.Del(ctx, lockKey(showtimeID, "A2")).Err(); err != nil {
+		t.Fatal(err)
 	}
-	if result, err := repository.Release(ctx, replacement); err != nil || result != ReleaseSucceeded {
-		t.Fatalf("replacement Release() = %v, %v", result, err)
+	published, err = repository.PublishExpiration(
+		ctx,
+		showtimeID,
+		"A2",
+		expiringGeneration,
+		transitionEvent(t, events.SeatLockExpired, expiring, ""),
+	)
+	if err != nil || !published {
+		t.Fatalf("PublishExpiration() = %v, %v", published, err)
+	}
+	assertTransition(t, messages, events.SeatLockExpired, expiringGeneration)
+	if err := repository.Confirm(
+		ctx,
+		expiring,
+		transitionEvent(t, events.BookingConfirmed, expiring, "booking-2"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	assertTransition(t, messages, events.BookingConfirmed, expiringGeneration)
+	published, err = repository.PublishExpiration(
+		ctx,
+		showtimeID,
+		"A2",
+		expiringGeneration,
+		transitionEvent(t, events.SeatLockExpired, expiring, ""),
+	)
+	if err != nil || published {
+		t.Fatalf("expiration after BOOKED = %v, %v", published, err)
+	}
+}
+
+func transitionEvent(
+	t *testing.T,
+	eventType events.Type,
+	lock SeatLock,
+	bookingID string,
+) events.DomainEvent {
+	t.Helper()
+	event, err := events.New(
+		eventType,
+		lock.ShowtimeID,
+		lock.SeatNo,
+		lock.UserID,
+		bookingID,
+		"",
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func assertTransition(
+	t *testing.T,
+	messages <-chan *goredis.Message,
+	eventType events.Type,
+	generation int64,
+) events.DomainEvent {
+	t.Helper()
+	select {
+	case message := <-messages:
+		event, err := events.Unmarshal([]byte(message.Payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != eventType || event.Generation != generation {
+			t.Fatalf("event = %#v, want type %q generation %d", event, eventType, generation)
+		}
+		return event
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %q generation %d", eventType, generation)
+		return events.DomainEvent{}
 	}
 }
 

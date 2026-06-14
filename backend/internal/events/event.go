@@ -29,6 +29,7 @@ type DomainEvent struct {
 	OccurredAt time.Time `json:"occurred_at"`
 	ShowtimeID string    `json:"showtime_id"`
 	SeatNo     string    `json:"seat_no"`
+	Generation int64     `json:"generation,omitempty"`
 	UserID     string    `json:"user_id,omitempty"`
 	BookingID  string    `json:"booking_id,omitempty"`
 	Reason     string    `json:"reason,omitempty"`
@@ -52,10 +53,15 @@ func New(
 	bookingID string,
 	reason string,
 	now time.Time,
+	generation ...int64,
 ) (DomainEvent, error) {
 	id, err := randomID(16)
 	if err != nil {
 		return DomainEvent{}, fmt.Errorf("generate event ID: %w", err)
+	}
+	var revision int64
+	if len(generation) > 0 {
+		revision = generation[0]
 	}
 	return DomainEvent{
 		Version:    CurrentVersion,
@@ -64,6 +70,7 @@ func New(
 		OccurredAt: now.UTC(),
 		ShowtimeID: strings.TrimSpace(showtimeID),
 		SeatNo:     strings.ToUpper(strings.TrimSpace(seatNo)),
+		Generation: revision,
 		UserID:     strings.TrimSpace(userID),
 		BookingID:  strings.TrimSpace(bookingID),
 		Reason:     strings.TrimSpace(reason),
@@ -81,10 +88,19 @@ func Unmarshal(data []byte) (DomainEvent, error) {
 	}
 	if event.Version != CurrentVersion || event.ID == "" || event.Type == "" ||
 		event.OccurredAt.IsZero() || event.ShowtimeID == "" || event.SeatNo == "" ||
-		!event.Type.Valid() {
+		!event.Type.Valid() || (event.Type.StateChanging() && event.Generation <= 0) {
 		return DomainEvent{}, fmt.Errorf("invalid domain event envelope")
 	}
 	return event, nil
+}
+
+func (eventType Type) StateChanging() bool {
+	switch eventType {
+	case SeatLocked, SeatReleased, SeatLockExpired, BookingConfirmed:
+		return true
+	default:
+		return false
+	}
 }
 
 func (eventType Type) Valid() bool {
