@@ -65,7 +65,7 @@ services:
       EVENT_CHANNEL: ${EVENT_CHANNEL:-cinema.events}
       WEBSOCKET_ALLOWED_ORIGINS: ${WEBSOCKET_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
-      - "${BACKEND_PORT:-8080}:8080"
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -91,7 +91,7 @@ services:
         VITE_DEV_USER_ROLE: ${VITE_DEV_USER_ROLE:-USER}
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
     depends_on:
       backend:
         condition: service_healthy
