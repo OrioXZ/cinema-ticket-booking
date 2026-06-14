@@ -1,54 +1,60 @@
 # Implementation Plan
 
-## Phase 1 — Scaffold and infrastructure
+## Phase 1 - Scaffold and infrastructure
 
-- Create Go + Gin backend
-- Create Vue 3 + TypeScript + Vite frontend
-- Add MongoDB and Redis connections
-- Add health endpoint
-- Add Dockerfiles
-- Add root `docker-compose.yml`
-- Add `.env.example`
-- Confirm `docker compose up --build`
+- [x] Create Go + Gin backend
+- [x] Create Vue 3 + TypeScript + Vite frontend
+- [x] Add MongoDB and Redis connections
+- [x] Add health endpoint
+- [x] Add Dockerfiles and Docker Compose
+- [x] Add `.env.example`
 
-## Phase 2 — Core domain and booking correctness
+## Phase 2 - Core domain and booking correctness
 
-- Seed movie, showtime, and seat data
-- Implement seat map API
-- Implement Redis seat lock with five-minute TTL
-- Add lock ownership token
-- Implement booking confirmation
-- Add MongoDB unique index for `(showtime_id, seat_no)`
-- Add focused concurrency tests
+- [x] Seed movie, showtime, and seat data
+- [x] Implement seat map API
+- [x] Implement Redis seat lock with five-minute TTL
+- [x] Add cryptographic lock ownership token
+- [x] Implement ownership-safe lock release
+- [x] Implement booking confirmation
+- [x] Add MongoDB unique index for `(showtime_id, seat_no)`
+- [x] Add focused unit and concurrency tests
+- [x] Add opt-in real MongoDB/Redis integration coverage
+- [x] Verify confirmation ownership atomically without renewing lock TTL
+- [x] Treat MongoDB insertion as the durable booking success boundary
+- [x] Make post-commit Redis cleanup best effort and observable
+- [x] Require explicit `MONGO_DATABASE` configuration
+- [x] Add focused HTTP error-contract coverage
+- [x] Add real Redis ownership, stale-token, expiry, and TTL coverage
 
-## Phase 3 — Realtime and asynchronous events
+Phase 2 uses temporary `X-User-ID` and `X-User-Role` headers. Phase 4 replaces
+this development-only boundary with verified Firebase claims.
 
-- Add WebSocket hub
-- Publish seat and booking events through Redis Pub/Sub
-- Broadcast updates to clients
-- Add asynchronous audit logging
+## Phase 3 - Realtime and asynchronous events
 
-## Phase 4 — Authentication and authorization
+- [ ] Add WebSocket hub
+- [ ] Publish seat and booking events through Redis Pub/Sub
+- [ ] Broadcast updates to clients
+- [ ] Add asynchronous audit logging
 
-- Add Firebase Authentication
-- Verify Firebase ID tokens in backend
-- Add `USER` and `ADMIN` roles
-- Protect admin APIs
+## Phase 4 - Authentication and authorization
 
-## Phase 5 — Frontend MVP
+- [ ] Add Firebase Authentication
+- [ ] Verify Firebase ID tokens in backend
+- [ ] Add `USER` and `ADMIN` roles
+- [ ] Protect admin APIs
 
-- Login screen
-- Seat map
-- Lock countdown
-- Mock payment confirmation
-- Admin booking table
-- One useful filter
+## Phase 5 - Frontend MVP
 
-## Phase 6 — Submission quality
+- [ ] Login screen
+- [ ] Seat map
+- [ ] Lock countdown
+- [ ] Mock payment confirmation
+- [ ] Admin booking table with one useful filter
 
-- Validate Docker startup
-- Review concurrency behavior
-- Complete README
-- Add architecture diagram
-- Document assumptions and trade-offs
-- Record demo video
+## Phase 6 - Submission quality
+
+- [ ] Review concurrency behavior
+- [ ] Complete final README and architecture diagram
+- [ ] Document final assumptions and trade-offs
+- [ ] Record demo video

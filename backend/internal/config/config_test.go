@@ -19,6 +19,7 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("BACKEND_PORT", "9090")
 	t.Setenv("MONGO_URI", "mongodb://mongo/test")
+	t.Setenv("MONGO_DATABASE", "test")
 	t.Setenv("REDIS_URI", "redis://redis:6379/1")
 
 	cfg, err := Load()
@@ -26,8 +27,19 @@ func TestLoadReadsEnvironment(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.AppEnv != "test" || cfg.Port != "9090" {
+	if cfg.AppEnv != "test" || cfg.Port != "9090" || cfg.MongoDatabase != "test" {
 		t.Fatalf("Load() returned unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadRequiresMongoDatabaseWithMongoURI(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://mongo/other")
+	t.Setenv("MONGO_DATABASE", "")
+	t.Setenv("REDIS_URI", "redis://redis:6379/0")
+
+	_, err := Load()
+	if err == nil || err.Error() != "MONGO_DATABASE is required" {
+		t.Fatalf("Load() error = %v, want MONGO_DATABASE is required", err)
 	}
 }
 

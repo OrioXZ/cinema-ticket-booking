@@ -33,3 +33,7 @@ func (c *Client) Ping(ctx context.Context) error {
 func (c *Client) Disconnect(ctx context.Context) error {
 	return c.client.Disconnect(ctx)
 }
+
+func (c *Client) Database(name string) *mongo.Database {
+	return c.client.Database(name)
+}

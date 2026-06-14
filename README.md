@@ -1,11 +1,11 @@
-﻿# Cinema Ticket Booking
+# Cinema Ticket Booking
 
-Phase 1 scaffold for a cinema ticket booking take-home assignment. The current
-application establishes a Go/Gin API, a Vue 3 frontend, MongoDB, Redis, and a
-reproducible Docker Compose environment.
+Phase 2 implementation of a cinema ticket booking take-home assignment. The
+application provides the core cinema domain, five-minute Redis seat locks,
+durable booking confirmation, concurrency protection, and Docker Compose setup.
 
-Booking, authentication, seat locking, realtime updates, Pub/Sub, and admin
-features are intentionally deferred to later phases.
+Firebase Authentication, realtime updates, Redis Pub/Sub, audit consumers,
+notifications, admin APIs, and the booking UI are intentionally deferred.
 
 ## Technology
 
@@ -13,77 +13,114 @@ features are intentionally deferred to later phases.
 - Vue 3, TypeScript, and Vite
 - MongoDB 8
 - Redis 8
-- Nginx for the production frontend container
+- Nginx
 - Docker Compose
 
 ## Quick Start
 
-Docker is the only prerequisite for the full stack.
-
 ```bash
 docker compose up --build
 ```
 
-The services are then available at:
+Services:
 
 - Frontend: <http://localhost:5173>
 - Backend health: <http://localhost:8080/health>
-- Proxied health endpoint: <http://localhost:5173/api/health>
+- Proxied health: <http://localhost:5173/api/health>
 
-Compose provides local development defaults, so copying an environment file is
-optional. To customize configuration:
+Compose has development defaults. Copy `.env.example` to `.env` only when
+customizing them. `MONGO_DATABASE` is always required by the backend, including
+when `MONGO_URI` is supplied; Compose explicitly provides its development
+database value. Stop the stack with `docker compose down`.
 
-```bash
-cp .env.example .env
-docker compose up --build
-```
+## Seeded Data
 
-Do not commit local `.env` variants; they are ignored by Git.
+Startup idempotently upserts movie `movie-1` and showtime `showtime-1`. The
+showtime contains seats `A1` through `A10` and `B1` through `B10`.
 
-Stop the stack with:
+## Phase 2 API
 
-```bash
-docker compose down
-```
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/showtimes` | List showtimes and movies |
+| `GET` | `/api/showtimes/:showtimeId/seats` | Resolve all seat states |
+| `POST` | `/api/showtimes/:showtimeId/seats/:seatNo/lock` | Acquire a lock |
+| `DELETE` | `/api/showtimes/:showtimeId/seats/:seatNo/lock` | Release an owned lock |
+| `POST` | `/api/bookings/confirm` | Confirm an owned lock as a booking |
+| `GET` | `/api/bookings/me` | List the current user's bookings |
 
-To also remove local MongoDB and Redis data:
+Mutations and personal bookings use `X-User-ID` as temporary Phase 2 identity.
+`X-User-Role` is parsed for later phases but no admin API exists yet. Identity
+from request bodies is never trusted. Firebase verification replaces these
+headers in Phase 4.
 
-```bash
-docker compose down --volumes
-```
-
-## Health Endpoint
-
-`GET /health` checks the application, MongoDB, and Redis. It returns HTTP `200`
-when every component is available and HTTP `503` when a dependency check fails.
-
-Example successful response:
+Errors use:
 
 ```json
 {
-  "status": "up",
-  "services": {
-    "application": { "status": "up" },
-    "mongodb": { "status": "up" },
-    "redis": { "status": "up" }
+  "error": {
+    "code": "SEAT_CONFLICT",
+    "message": "the seat is already locked or booked"
   }
 }
 ```
 
-## Local Development
-
-Start MongoDB and Redis with Docker:
-
-```bash
-docker compose up -d mongodb redis
-```
-
-Compose publishes MongoDB and Redis only on the loopback interface at
-`127.0.0.1:27017` and `127.0.0.1:6379`. Run the backend:
+Example lock and confirmation:
 
 ```powershell
+$lock = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8080/api/showtimes/showtime-1/seats/A1/lock `
+  -Headers @{"X-User-ID" = "demo-user"}
+
+$body = @{
+  showtime_id = "showtime-1"
+  seat_no = "A1"
+  ownership_token = $lock.ownership_token
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8080/api/bookings/confirm `
+  -Headers @{"X-User-ID" = "demo-user"} `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+## Lock and Booking Correctness
+
+Redis locks use:
+
+```text
+key:   seat_lock:{showtimeId}:{seatNo}
+value: {"user_id":"...","ownership_token":"..."}
+TTL:   5 minutes
+```
+
+Acquisition uses Redis `SET NX` with expiration. Ownership tokens contain 256
+random bits from `crypto/rand`; user ID alone cannot release or confirm a lock.
+Release uses one Lua compare-and-delete operation. Seat maps use `MGET` for the
+configured seats and never use Redis `KEYS`.
+
+Confirmation validates the showtime and seat and atomically compares both lock
+owner fields without changing the lock's remaining TTL. A correct owner can
+confirm only during the original five-minute window; repeated attempts never
+refresh it. MongoDB then inserts the `CONFIRMED` booking. Its unique compound
+index on `(showtime_id, seat_no)` is the final double-booking barrier, and
+duplicate keys return HTTP `409`.
+
+Successful MongoDB insertion is the durable success boundary. Redis lock
+release afterward is best effort: a cleanup error is logged and the API still
+returns the confirmed booking. The remaining lock may temporarily appear until
+its original TTL expires. Redis and MongoDB do not share a transaction, but
+these cases cannot permit two durable bookings because the MongoDB unique index
+remains authoritative.
+
+## Local Development
+
+```powershell
+docker compose up -d mongodb redis
 cd backend
-go mod download
 $env:MONGO_HOST = "127.0.0.1:27017"
 $env:MONGO_DATABASE = "cinema"
 $env:MONGO_USERNAME = "cinema"
@@ -92,85 +129,85 @@ $env:REDIS_URI = "redis://127.0.0.1:6379/0"
 go run ./cmd/api
 ```
 
-Run the frontend in another terminal:
+Run the frontend separately with `npm install` and `npm run dev` from
+`frontend`. Vite preserves `/api` when proxying to port `8080`.
 
-```bash
-cd frontend
-npm install
-npm run dev
+## Validation
+
+Backend:
+
+```powershell
+cd backend
+gofmt -w cmd internal
+go mod tidy
+go test ./...
+go build -o bin/api.exe ./cmd/api
+cd ..
 ```
 
-The Vite development server proxies `/api` requests to the backend on port
-`8080`.
+Opt-in real MongoDB/Redis integration and concurrency test:
+
+```powershell
+docker compose up -d mongodb redis
+cd backend
+$env:MONGO_URI = "mongodb://cinema:cinema_dev_password@127.0.0.1:27017/?authSource=admin"
+$env:MONGO_DATABASE = "cinema"
+$env:REDIS_URI = "redis://127.0.0.1:6379/15"
+go test -tags=integration ./internal/booking
+cd ..
+```
+
+The integration test drops only `cinema_phase2_integration` and removes its
+known Redis lock keys.
+
+## Postman Collection
+
+The ordered Phase 2 workflow is available in `postman/`.
+
+1. Reset local state with `docker compose down --volumes`.
+2. Start the stack with `docker compose up --build`.
+3. Import both JSON files from `postman/` into Postman.
+4. Select the `Cinema Local` environment.
+5. Run the `Cinema Ticket Booking` collection in order.
+6. Use clean seeded data; the workflow expects all seats to begin as
+   `AVAILABLE`.
+
+The collection validates health, catalog, seat maps, identity and validation
+errors, lock ownership and release, and booking confirmation. These Postman
+tests complement but do not replace the Go unit, race, or integration tests.
+
+Frontend and Compose:
+
+```powershell
+cd frontend
+npm.cmd ci
+npm.cmd run type-check
+npm.cmd run build
+cd ..
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+curl.exe --fail http://localhost:8080/health
+curl.exe --fail http://localhost:5173/api/health
+docker compose down
+```
 
 ## Project Structure
 
 ```text
-.
-|-- backend/
-|   |-- cmd/api/                 # Application entry point
-|   |-- internal/config/         # Environment configuration
-|   |-- internal/health/         # Health HTTP handler
-|   |-- internal/platform/       # MongoDB and Redis clients
-|   `-- Dockerfile
-|-- frontend/
-|   |-- src/                     # Vue application
-|   |-- Dockerfile
-|   `-- nginx.conf               # Static hosting and API proxy
-|-- docs/                        # Assignment and design notes
-|-- .env.example
-`-- docker-compose.yml
+backend/internal/booking/   Domain, service, handlers, MongoDB and Redis adapters
+backend/internal/identity/  Temporary Phase 2 request identity
+backend/internal/health/    Dependency-aware health endpoint
+frontend/                   Vue scaffold and API proxies
+docs/                       Assignment and architecture notes
 ```
-
-## Validation
-
-Run backend formatting and tests:
-
-```bash
-cd backend
-gofmt -w cmd internal
-go test ./...
-go build -o bin/api.exe ./cmd/api
-```
-
-Run frontend type checking and build:
-
-```bash
-cd frontend
-npm ci
-npm run type-check
-npm run build
-```
-
-Validate Compose and perform an end-to-end health check:
-
-```bash
-docker compose config --quiet
-docker compose up --build -d
-docker compose ps
-curl http://localhost:8080/health
-curl http://localhost:5173/api/health
-docker compose down
-```
-
-## Configuration
-
-Environment-dependent values and development credentials are supplied through
-environment variables. See [`.env.example`](.env.example) for the supported
-phase 1 settings.
-
-Internal implementation defaults remain in code and container configuration,
-including dependency timeouts, internal container ports, the Compose service
-name used by Nginx, and the Vite development proxy target. These are not intended
-as deployment settings in phase 1.
-
-The credentials in `.env.example` are development-only placeholders and must be
-changed outside local development.
 
 ## Current Limitations
 
-- No domain data or booking APIs exist yet.
-- Redis is connected only for health verification in phase 1; distributed
-  locking and Pub/Sub will be introduced in their designated phases.
-- MongoDB is connected only for health verification; collections and indexes
-  will be introduced with the booking domain.
+- Development headers are not secure authentication.
+- No WebSocket, Pub/Sub, realtime broadcast, audit, notification, or admin API.
+- The Vue screen remains the infrastructure status page; booking UI is Phase 5.
+- Payment is the mock confirmation action.
+- Redis/MongoDB confirmation is not a cross-system transaction.
+- Post-commit Redis cleanup has no reconciliation worker yet; an owned lock may
+  remain visible until its original TTL expires.
