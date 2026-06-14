@@ -1,99 +1,140 @@
 # Architecture
 
-Status: Phase 2 implemented
+Status: Phase 3 implemented
 
 ## Components
 
-- Vue 3 frontend scaffold and API proxy
-- Go + Gin backend
-- MongoDB for movies, showtimes, and bookings
-- Redis for temporary distributed seat locks
+- Vue 3 frontend scaffold with HTTP and WebSocket proxying
+- Go + Gin REST API and WebSocket endpoint
+- MongoDB for movies, showtimes, bookings, and audit logs
+- Redis for temporary seat locks, Pub/Sub, and expiration notifications
 - Docker Compose for the complete local stack
 
-`internal/booking` contains domain models, business services, Gin handlers,
-MongoDB persistence, and the Redis lock adapter. `internal/identity` provides
-temporary Phase 2 header identity. Handlers stay thin; repositories and lock
-operations are interfaces so service behavior can be tested deterministically.
+Package boundaries:
 
-WebSocket, Redis Pub/Sub, Firebase Authentication, audit processing,
-notifications, and admin APIs remain deferred.
+- `internal/booking`: Phase 2 domain, REST service, repositories, and handlers
+- `internal/events`: versioned domain events, Redis publisher/subscriber, and
+  seat-lock expiration listener
+- `internal/audit`: asynchronous audit projection and MongoDB repository
+- `internal/realtime`: public event projection, WebSocket hub, clients, and
+  showtime handler
+- `internal/identity`: temporary Phase 2 header identity
 
-## Data Model
+Firebase Authentication, admin APIs, notifications, and the booking frontend
+remain deferred.
 
-- `movies`: stable seeded movie documents
-- `showtimes`: stable seeded showtimes with ordered seat definitions
-- `bookings`: durable confirmed bookings
-- Redis only: active seat locks
+## Event Flow
 
-Movie `movie-1` and showtime `showtime-1` are replaced with upsert semantics on
-startup. This keeps seed data deterministic and idempotent.
+1. A booking operation completes its authoritative Redis or MongoDB transition.
+2. The service publishes a best-effort domain event to `cinema.events`.
+3. Independent Redis subscribers receive the same event.
+4. The audit subscriber inserts an idempotent `audit_logs` document.
+5. The realtime subscriber maps state changes to public `seat.updated` messages.
+6. The WebSocket hub broadcasts only to the matching showtime room.
 
-MongoDB indexes:
+Publisher or consumer failures do not change successful REST results. Logs omit
+tokens, credentials, connection strings, and raw event payloads.
 
-- Unique `bookings(showtime_id, seat_no)`, named `unique_showtime_seat`
-- `bookings(user_id, created_at desc)`, named `bookings_by_user`
+## Domain Event Contract
 
-## Booking Flow
-
-1. A Phase 2 client supplies `X-User-ID`; request-body identity is ignored.
-2. The service validates the showtime and configured seat.
-3. It checks durable booking state.
-4. Redis `SET NX` creates a five-minute lock with a random ownership token.
-5. Durable booking state is checked again after acquisition.
-6. Confirmation atomically compares the user ID and token without changing the
-   original five-minute TTL.
-7. MongoDB inserts the `CONFIRMED` booking.
-8. The unique index rejects any competing booking for that seat.
-9. A Lua compare-and-delete attempts to remove the owned lock.
-10. Redis cleanup is best effort; MongoDB commit remains a successful booking
-    even if cleanup fails.
-
-## Seat State
-
-The service starts with the showtime's ordered seat definitions, reads confirmed
-bookings from MongoDB, and reads active locks with Redis `MGET`. Every configured
-seat is returned. State precedence is:
-
-1. `BOOKED`
-2. `LOCKED`
-3. `AVAILABLE`
-
-## Redis Lock
+The internal envelope is version `1` and contains:
 
 ```text
-seat_lock:{showtimeId}:{seatNo}
-{"user_id":"...","ownership_token":"..."}
+version, id, type, occurred_at, showtime_id, seat_no,
+user_id, booking_id, reason
 ```
 
-The ownership token is 32 random bytes encoded as hexadecimal. Release compares
-the complete serialized owner and deletes only inside a Lua script. A stale
-token, including one for the same user, cannot remove a newer lock. Redis TTL
-automatically makes abandoned locks available after five minutes. Confirmation
-uses a separate compare-only Lua script. It returns missing, mismatched, or
-matched atomically and never resets or increases the remaining TTL.
+Event IDs use cryptographically random bytes and timestamps are UTC. Supported
+types:
 
-## Correctness Boundary
+- `seat.locked`
+- `seat.released`
+- `seat.lock_expired`
+- `booking.confirmed`
+- `lock.acquisition_failed`
 
-Redis and MongoDB cannot participate in one atomic transaction. MongoDB
-insertion is the durable success boundary. If lock cleanup fails afterward, the
-API still returns the confirmed booking and logs the cleanup failure without
-ownership data. The lock expires at its original deadline. If a lock expires
-during an in-flight confirmation, MongoDB's unique index still prevents two
-confirmed bookings. The unique index, not the temporary lock, is the final
-correctness boundary.
+Ownership tokens are never included.
 
-## Configuration
+## Realtime Contract
 
-`MONGO_DATABASE` is required independently of connection addressing. A complete
-`MONGO_URI` may be supplied, or the URI may be assembled from host and
-credentials, but the database selected by the application is always the
-explicit `MONGO_DATABASE` value. The application does not infer it from a URI.
+Endpoint:
 
-## Deferred Work
+```text
+GET /ws/showtimes/:showtimeId
+```
 
-- WebSocket event envelope and connection hub
-- Redis Pub/Sub producers and consumers
-- Audit and notification processing
-- Firebase claim verification and role mapping
-- Admin APIs and UI
-- Reconciliation for rare post-commit lock cleanup failures
+Public messages contain:
+
+```text
+type=seat.updated, event_id, showtime_id, seat_no, state, occurred_at
+```
+
+Mappings:
+
+- `seat.locked` -> `LOCKED`
+- `seat.released` -> `AVAILABLE`
+- `seat.lock_expired` -> `AVAILABLE`
+- `booking.confirmed` -> `BOOKED`
+
+`lock.acquisition_failed` is audited but not broadcast. User identity and
+internal reasons are excluded.
+
+The hub owns room membership under synchronization. Each connection has one
+writer goroutine and a bounded send queue. Slow clients are removed instead of
+blocking other clients. Read and write deadlines plus ping/pong detect dead
+connections. Local browser origins are controlled by
+`WEBSOCKET_ALLOWED_ORIGINS`; clients without an Origin header are allowed for
+CLI and test use.
+
+## Audit Logs
+
+MongoDB collection `audit_logs` stores:
+
+```text
+event_id, event_type, occurred_at, processed_at,
+showtime_id, seat_no, user_id, booking_id, reason
+```
+
+Indexes:
+
+- Unique `event_id`, named `unique_event_id`
+- Descending `occurred_at`, named `recent_audit_events`
+
+Duplicate event IDs are treated as already processed.
+
+## Lock Expiration
+
+Redis enables keyevent expiration notifications with `Ex`. The backend
+subscribes to `__keyevent@<db>__:expired`, accepts only keys shaped as
+`seat_lock:{showtimeId}:{seatNo}`, and republishes `seat.lock_expired` through
+`cinema.events`. Expiration notifications contain no former owner, so timeout
+events omit `user_id`.
+
+## Booking Correctness
+
+Phase 2 correctness remains unchanged. Redis lock ownership protects temporary
+selection, while MongoDB's unique `(showtime_id, seat_no)` index is the final
+double-booking barrier. Event publishing is outside that correctness boundary.
+MongoDB booking insertion remains the durable confirmation success point, and
+post-commit lock cleanup remains best effort.
+
+## Lifecycle
+
+Startup initializes MongoDB indexes and Redis before starting:
+
+- Audit Redis subscriber
+- Realtime Redis subscriber
+- Lock-expiration listener
+- HTTP/WebSocket server
+
+Shutdown stops HTTP traffic, cancels the root worker context, closes WebSocket
+clients, waits for subscriptions to exit, then disconnects Redis and MongoDB.
+Background runtime errors are logged without calling `log.Fatal`.
+
+## Delivery Trade-off
+
+Redis Pub/Sub and keyspace notifications are non-durable. Events can be missed
+while the backend or a consumer is offline, and disconnected WebSocket clients
+receive no backlog. Clients must reload the authoritative REST seat map after
+every connect or reconnect. No polling, reconciliation, or durable broker is
+implemented in Phase 3.

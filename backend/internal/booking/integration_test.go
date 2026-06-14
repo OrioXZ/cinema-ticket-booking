@@ -17,6 +17,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 )
 
 func TestRealMongoAndRedisConcurrency(t *testing.T) {
@@ -51,7 +53,13 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 	}
 
 	lockRepository := NewRedisLockRepository(redisClient)
-	service := NewService(repository, repository, lockRepository, log.New(io.Discard, "", 0))
+	service := NewService(
+		repository,
+		repository,
+		lockRepository,
+		events.NoopPublisher{},
+		log.New(io.Discard, "", 0),
+	)
 
 	const lockAttempts = 24
 	var lockWins atomic.Int32

@@ -7,17 +7,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/audit"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/booking"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/config"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/health"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/identity"
 	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/mongodb"
 	redisclient "github.com/OrioXZ/cinema-ticket-booking/backend/internal/platform/redis"
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/realtime"
 )
 
 func main() {
@@ -56,17 +60,70 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	bookingRepository := booking.NewMongoRepository(mongoClient.Database(cfg.MongoDatabase))
+	database := mongoClient.Database(cfg.MongoDatabase)
+	bookingRepository := booking.NewMongoRepository(database)
+	auditRepository := audit.NewMongoRepository(database)
 	initializeCtx, cancelInitialize := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := bookingRepository.Initialize(initializeCtx); err != nil {
 		cancelInitialize()
 		log.Fatalf("initialize booking persistence: %v", err)
 	}
+	if err := auditRepository.Initialize(initializeCtx); err != nil {
+		cancelInitialize()
+		log.Fatalf("initialize audit persistence: %v", err)
+	}
 	cancelInitialize()
 
+	appCtx, cancelApp := context.WithCancel(context.Background())
+	defer cancelApp()
+
+	eventPublisher := events.NewRedisPublisher(redisClient.Raw(), cfg.EventChannel)
 	lockRepository := booking.NewRedisLockRepository(redisClient.Raw())
-	bookingService := booking.NewService(bookingRepository, bookingRepository, lockRepository, log.Default())
+	bookingService := booking.NewService(
+		bookingRepository,
+		bookingRepository,
+		lockRepository,
+		eventPublisher,
+		log.Default(),
+	)
 	bookingHandler := booking.NewHandler(bookingService)
+	hub := realtime.NewHub()
+	websocketHandler := realtime.NewHandler(hub, cfg.WebSocketOrigins)
+
+	auditConsumer := audit.NewConsumer(auditRepository)
+	auditSubscriber := events.NewRedisSubscriber(
+		redisClient.Raw(),
+		cfg.EventChannel,
+		auditConsumer.Handle,
+		log.Default(),
+	)
+	realtimeConsumer := realtime.NewConsumer(hub)
+	realtimeSubscriber := events.NewRedisSubscriber(
+		redisClient.Raw(),
+		cfg.EventChannel,
+		realtimeConsumer.Handle,
+		log.Default(),
+	)
+	expirationListener := events.NewExpirationListener(
+		redisClient.Raw(),
+		redisClient.Raw().Options().DB,
+		eventPublisher,
+		log.Default(),
+	)
+
+	var workers sync.WaitGroup
+	startWorker := func(name string, run func(context.Context) error) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := run(appCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("%s stopped with error", name)
+			}
+		}()
+	}
+	startWorker("audit subscriber", auditSubscriber.Run)
+	startWorker("realtime subscriber", realtimeSubscriber.Run)
+	startWorker("lock expiration listener", expirationListener.Run)
 
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery(), identity.DevelopmentMiddleware())
@@ -76,6 +133,7 @@ func main() {
 	api := router.Group("/api")
 	api.GET("/health", healthHandler.Get)
 	bookingHandler.Register(api)
+	router.GET("/ws/showtimes/:showtimeId", websocketHandler.Get)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -83,20 +141,28 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("backend listening on %s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve HTTP: %v", err)
+			serverErrors <- err
 		}
 	}()
 
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
-	<-shutdownSignal
+	select {
+	case <-shutdownSignal:
+	case err := <-serverErrors:
+		log.Printf("HTTP server stopped with error: %v", err)
+	}
 
+	cancelApp()
+	hub.Shutdown()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown HTTP server: %v", err)
 	}
+	workers.Wait()
 }

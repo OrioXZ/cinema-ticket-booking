@@ -1,11 +1,12 @@
 # Cinema Ticket Booking
 
-Phase 2 implementation of a cinema ticket booking take-home assignment. The
+Phase 3 implementation of a cinema ticket booking take-home assignment. The
 application provides the core cinema domain, five-minute Redis seat locks,
-durable booking confirmation, concurrency protection, and Docker Compose setup.
+durable booking confirmation, Redis Pub/Sub events, realtime WebSocket seat
+updates, asynchronous MongoDB audit logs, and Docker Compose setup.
 
-Firebase Authentication, realtime updates, Redis Pub/Sub, audit consumers,
-notifications, admin APIs, and the booking UI are intentionally deferred.
+Firebase Authentication, notifications, admin APIs, and the booking UI are
+intentionally deferred.
 
 ## Technology
 
@@ -13,6 +14,8 @@ notifications, admin APIs, and the booking UI are intentionally deferred.
 - Vue 3, TypeScript, and Vite
 - MongoDB 8
 - Redis 8
+- Redis Pub/Sub and keyspace expiration notifications
+- WebSocket realtime updates
 - Nginx
 - Docker Compose
 
@@ -116,6 +119,103 @@ its original TTL expires. Redis and MongoDB do not share a transaction, but
 these cases cannot permit two durable bookings because the MongoDB unique index
 remains authoritative.
 
+## Realtime Events
+
+Phase 3 publishes a versioned internal event envelope to Redis channel
+`cinema.events`:
+
+```json
+{
+  "version": 1,
+  "id": "random-event-id",
+  "type": "seat.locked",
+  "occurred_at": "2026-06-14T12:00:00Z",
+  "showtime_id": "showtime-1",
+  "seat_no": "A1",
+  "user_id": "user-1",
+  "booking_id": "",
+  "reason": ""
+}
+```
+
+Event types are:
+
+- `seat.locked`
+- `seat.released`
+- `seat.lock_expired`
+- `booking.confirmed`
+- `lock.acquisition_failed`
+
+Publishing and consumption are best effort. Redis Pub/Sub is non-durable, so
+events may be missed while the application or client is offline. REST booking
+and lock correctness remains authoritative.
+
+Two Redis subscribers consume `cinema.events` independently:
+
+- The realtime consumer projects state-changing events to WebSocket rooms.
+- The audit consumer inserts asynchronous records into MongoDB `audit_logs`.
+
+WebSocket clients connect to one showtime:
+
+```text
+ws://localhost:8080/ws/showtimes/showtime-1
+ws://localhost:5173/ws/showtimes/showtime-1
+```
+
+Public messages never contain user identity:
+
+```json
+{
+  "type": "seat.updated",
+  "event_id": "random-event-id",
+  "showtime_id": "showtime-1",
+  "seat_no": "A1",
+  "state": "LOCKED",
+  "occurred_at": "2026-06-14T12:00:00Z"
+}
+```
+
+Possible public states are `LOCKED`, `AVAILABLE`, and `BOOKED`. After connecting
+or reconnecting, clients must reload the REST seat map because Pub/Sub and
+WebSocket delivery are transient.
+
+## Lock Expiration
+
+Redis runs with `notify-keyspace-events Ex`. The backend subscribes to
+`__keyevent@0__:expired`, filters `seat_lock:{showtimeId}:{seatNo}` keys, and
+publishes `seat.lock_expired`. The realtime projection sends `AVAILABLE`, and
+the audit consumer records the timeout. Expiration events can be missed while
+the backend is offline; no polling or reconciliation worker exists in Phase 3.
+
+## Audit Logs
+
+The `audit_logs` collection records booking confirmation, manual release, lock
+expiration, and lock acquisition failure. It has:
+
+- Unique index `unique_event_id` on `event_id`
+- Index `recent_audit_events` on `occurred_at` descending
+
+Inspect recent audit entries:
+
+```powershell
+docker compose exec mongodb mongosh `
+  --username cinema `
+  --password cinema_dev_password `
+  --authenticationDatabase admin `
+  cinema `
+  --eval "db.audit_logs.find().sort({occurred_at:-1}).limit(20).toArray()"
+```
+
+Audit writes happen after the originating HTTP request through Redis Pub/Sub.
+Duplicate event delivery is idempotent by `event_id`.
+
+## Graceful Shutdown
+
+The backend owns a root application context for the HTTP server, audit
+subscriber, realtime subscriber, and expiration listener. Shutdown stops HTTP
+traffic, cancels subscriptions, closes WebSocket clients, waits for workers,
+and only then closes Redis and MongoDB.
+
 ## Local Development
 
 ```powershell
@@ -153,12 +253,18 @@ cd backend
 $env:MONGO_URI = "mongodb://cinema:cinema_dev_password@127.0.0.1:27017/?authSource=admin"
 $env:MONGO_DATABASE = "cinema"
 $env:REDIS_URI = "redis://127.0.0.1:6379/15"
-go test -tags=integration ./internal/booking
+go test -tags=integration ./internal/...
 cd ..
 ```
 
 The integration test drops only `cinema_phase2_integration` and removes its
-known Redis lock keys.
+known Redis lock keys. Phase 3 integration tests also use isolated audit
+databases and Redis channels.
+
+To test realtime updates manually, connect one or more WebSocket clients to a
+showtime URL, then run the lock, release, and confirmation REST requests above.
+Expect `LOCKED`, `AVAILABLE`, and `BOOKED` messages respectively. A client in a
+different showtime room must receive none of those messages.
 
 ## Postman Collection
 
@@ -195,8 +301,11 @@ docker compose down
 ## Project Structure
 
 ```text
+backend/internal/audit/     Asynchronous MongoDB audit consumer
 backend/internal/booking/   Domain, service, handlers, MongoDB and Redis adapters
+backend/internal/events/    Event contract, Redis transport, expiration listener
 backend/internal/identity/  Temporary Phase 2 request identity
+backend/internal/realtime/  WebSocket hub, clients, and public event projection
 backend/internal/health/    Dependency-aware health endpoint
 frontend/                   Vue scaffold and API proxies
 docs/                       Assignment and architecture notes
@@ -205,9 +314,10 @@ docs/                       Assignment and architecture notes
 ## Current Limitations
 
 - Development headers are not secure authentication.
-- No WebSocket, Pub/Sub, realtime broadcast, audit, notification, or admin API.
+- No Firebase Authentication, notification delivery, or admin API.
 - The Vue screen remains the infrastructure status page; booking UI is Phase 5.
 - Payment is the mock confirmation action.
 - Redis/MongoDB confirmation is not a cross-system transaction.
 - Post-commit Redis cleanup has no reconciliation worker yet; an owned lock may
   remain visible until its original TTL expires.
+- Redis Pub/Sub, WebSocket updates, and expiration notifications are transient.

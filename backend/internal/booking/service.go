@@ -8,16 +8,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 )
 
 const lockTTL = 5 * time.Minute
 
 type Service struct {
-	catalog  CatalogRepository
-	bookings BookingRepository
-	locks    LockRepository
-	logger   Logger
-	now      func() time.Time
+	catalog   CatalogRepository
+	bookings  BookingRepository
+	locks     LockRepository
+	publisher events.Publisher
+	logger    Logger
+	now       func() time.Time
 }
 
 type Logger interface {
@@ -28,14 +31,16 @@ func NewService(
 	catalog CatalogRepository,
 	bookings BookingRepository,
 	locks LockRepository,
+	publisher events.Publisher,
 	logger Logger,
 ) *Service {
 	return &Service{
-		catalog:  catalog,
-		bookings: bookings,
-		locks:    locks,
-		logger:   logger,
-		now:      time.Now,
+		catalog:   catalog,
+		bookings:  bookings,
+		locks:     locks,
+		publisher: publisher,
+		logger:    logger,
+		now:       time.Now,
 	}
 }
 
@@ -84,6 +89,7 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 		return SeatLock{}, err
 	}
 	if booked {
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already booked")
 		return SeatLock{}, ErrSeatConflict
 	}
 
@@ -103,6 +109,7 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 		return SeatLock{}, err
 	}
 	if !acquired {
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already locked")
 		return SeatLock{}, ErrSeatConflict
 	}
 
@@ -113,8 +120,10 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 	}
 	if booked {
 		_, _ = s.locks.Release(ctx, lock)
+		s.publish(ctx, events.LockAcquisitionFailed, showtimeID, seatNo, userID, "", "seat already booked")
 		return SeatLock{}, ErrSeatConflict
 	}
+	s.publish(ctx, events.SeatLocked, showtimeID, seatNo, userID, "", "")
 	return lock, nil
 }
 
@@ -135,6 +144,7 @@ func (s *Service) ReleaseLock(ctx context.Context, showtimeID, seatNo, userID, t
 	}
 	switch result {
 	case ReleaseSucceeded:
+		s.publish(ctx, events.SeatReleased, showtimeID, seatNo, userID, "", "")
 		return nil
 	case ReleaseNotOwned:
 		return ErrLockNotOwned
@@ -184,6 +194,15 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		}
 		return Booking{}, err
 	}
+	s.publish(
+		ctx,
+		events.BookingConfirmed,
+		showtimeID,
+		seatNo,
+		userID,
+		confirmed.ID,
+		"",
+	)
 
 	_, err = s.locks.Release(ctx, lock)
 	if err != nil {
@@ -194,6 +213,43 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		)
 	}
 	return confirmed, nil
+}
+
+func (s *Service) publish(
+	ctx context.Context,
+	eventType events.Type,
+	showtimeID string,
+	seatNo string,
+	userID string,
+	bookingID string,
+	reason string,
+) {
+	event, err := events.New(
+		eventType,
+		showtimeID,
+		seatNo,
+		userID,
+		bookingID,
+		reason,
+		s.now(),
+	)
+	if err != nil {
+		s.logger.Printf(
+			"domain event creation failed for type %q showtime %q seat %q",
+			eventType,
+			showtimeID,
+			seatNo,
+		)
+		return
+	}
+	if err := s.publisher.Publish(ctx, event); err != nil {
+		s.logger.Printf(
+			"domain event publish failed for type %q showtime %q seat %q",
+			eventType,
+			showtimeID,
+			seatNo,
+		)
+	}
 }
 
 func (s *Service) MyBookings(ctx context.Context, userID string) ([]Booking, error) {

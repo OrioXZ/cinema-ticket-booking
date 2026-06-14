@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/OrioXZ/cinema-ticket-booking/backend/internal/events"
 )
 
 func TestAcquireLockSucceeds(t *testing.T) {
@@ -322,7 +324,7 @@ func newTestServiceWithLogger(logger Logger) (*Service, *fakeBookings, *fakeLock
 		items: make(map[string]fakeLockEntry),
 		now:   time.Now,
 	}
-	return NewService(catalog, bookings, locks, logger), bookings, locks
+	return NewService(catalog, bookings, locks, events.NoopPublisher{}, logger), bookings, locks
 }
 
 type fakeCatalog struct {
