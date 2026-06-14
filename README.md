@@ -42,7 +42,7 @@ booking storage.
 - Vue 3, TypeScript, and Vite
 - MongoDB 8
 - Redis 8
-- Redis Pub/Sub and keyspace expiration notifications
+- Redis Pub/Sub as the implemented messaging/event bus, plus keyspace expiration notifications
 - WebSocket realtime updates
 - Firebase Authentication and Firebase Admin token verification
 - Nginx
@@ -271,16 +271,24 @@ and the API still returns the confirmed booking. Redis and MongoDB do not share
 a transaction, so this is not cross-system atomicity. These failures cannot
 permit two durable bookings because MongoDB remains authoritative.
 
-## Message Queue / Event Bus
+## Message Queue Requirement — Redis Pub/Sub
 
-The project does **not** use a durable message queue. Redis Pub/Sub is a
-transient event bus on channel `cinema.events`. A realtime consumer forwards
-seat-state changes to WebSocket rooms, while an independent audit consumer
-writes asynchronous audit records to MongoDB.
+Redis Pub/Sub is the project's implemented messaging mechanism, transient
+message broker, and event bus. Real application flows publish seat lock,
+release, expiration, and successful booking confirmation events to
+`cinema.events`; this is active infrastructure, not an unused placeholder.
 
-Pub/Sub can lose events while consumers are offline. REST and MongoDB remain
-authoritative, and the frontend reloads the REST seat map after every
-WebSocket connection or reconnection.
+The requirement has two active consumers and real use cases:
+
+1. **Realtime seat updates:** the realtime consumer forwards events to
+   showtime-specific WebSocket rooms.
+2. **Async logging:** the audit consumer writes audit records to MongoDB
+   without blocking the originating HTTP request.
+
+Redis Pub/Sub is intentionally non-durable and provides no acknowledgement,
+retry, or replay. Events can be missed while consumers are offline. MongoDB
+and the REST seat map remain authoritative, and clients reload the REST seat
+map after a WebSocket reconnect.
 
 The backend publishes this versioned internal event envelope:
 
