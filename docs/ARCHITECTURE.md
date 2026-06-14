@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 3 implemented
+Status: Phase 4 implemented
 
 ## Components
 
@@ -9,6 +9,7 @@ Status: Phase 3 implemented
 - MongoDB for movies, showtimes, bookings, and audit logs
 - Redis for temporary seat locks, Pub/Sub, and expiration notifications
 - Docker Compose for the complete local stack
+- Firebase Authentication with explicit development fallback mode
 
 Package boundaries:
 
@@ -18,10 +19,36 @@ Package boundaries:
 - `internal/audit`: asynchronous audit projection and MongoDB repository
 - `internal/realtime`: public event projection, WebSocket hub, clients, and
   showtime handler
-- `internal/identity`: temporary Phase 2 header identity
+- `internal/identity`: application identity, roles, middleware, development
+  adapter, and Firebase Admin verifier
 
-Firebase Authentication, admin APIs, notifications, and the booking frontend
-remain deferred.
+Notifications and the final booking/admin frontend remain deferred.
+
+## Authentication And Authorization
+
+```text
+Browser
+  -> Firebase Google Sign-In
+  -> Firebase ID token
+  -> Gin authentication middleware
+  -> verified Identity
+  -> booking/admin handlers
+```
+
+Handlers and booking services do not depend on Firebase SDK types. The Firebase
+adapter implements a token-verifier interface and maps a verified UID plus the
+canonical custom `role` claim into `USER` or `ADMIN`. Unknown and malformed
+roles default to `USER`.
+
+`AUTH_MODE=development` is an explicit local adapter for `X-User-ID` and
+`X-User-Role`; `AUTH_MODE=firebase` ignores those headers and requires a bearer
+ID token. Unsupported modes and invalid Firebase startup configuration fail
+without silently falling back.
+
+Public catalog, health, and WebSocket routes require no identity. Booking
+mutations and personal bookings require either role. `/api/admin/bookings`
+requires `ADMIN`, lists confirmed bookings newest first, and supports an exact
+user filter plus bounded limit.
 
 ## Event Flow
 
@@ -81,6 +108,8 @@ Mappings:
 
 `lock.acquisition_failed` is audited but not broadcast. User identity and
 internal reasons are excluded.
+The public WebSocket remains unauthenticated and carries neither identity nor
+lock ownership tokens.
 
 The hub owns room membership under synchronization. Each connection has one
 writer goroutine and a bounded send queue. Slow clients are removed instead of

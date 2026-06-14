@@ -1,12 +1,12 @@
 # Cinema Ticket Booking
 
-Phase 3 implementation of a cinema ticket booking take-home assignment. The
+Phase 4 implementation of a cinema ticket booking take-home assignment. The
 application provides the core cinema domain, five-minute Redis seat locks,
 durable booking confirmation, Redis Pub/Sub events, realtime WebSocket seat
-updates, asynchronous MongoDB audit logs, and Docker Compose setup.
+updates, asynchronous MongoDB audit logs, Firebase authentication support,
+role authorization, an admin bookings API, and Docker Compose setup.
 
-Firebase Authentication, notifications, admin APIs, and the booking UI are
-intentionally deferred.
+The final login, booking, and admin screens remain deferred to Phase 5.
 
 ## Technology
 
@@ -16,6 +16,7 @@ intentionally deferred.
 - Redis 8
 - Redis Pub/Sub and keyspace expiration notifications
 - WebSocket realtime updates
+- Firebase Authentication and Firebase Admin token verification
 - Nginx
 - Docker Compose
 
@@ -34,28 +35,101 @@ Services:
 Compose has development defaults. Copy `.env.example` to `.env` only when
 customizing them. `MONGO_DATABASE` is always required by the backend, including
 when `MONGO_URI` is supplied; Compose explicitly provides its development
-database value. Stop the stack with `docker compose down`.
+database value. Authentication defaults explicitly to local development mode,
+so evaluators can start the system without owning a Firebase project. Stop the
+stack with `docker compose down`.
 
 ## Seeded Data
 
 Startup idempotently upserts movie `movie-1` and showtime `showtime-1`. The
 showtime contains seats `A1` through `A10` and `B1` through `B10`.
 
-## Phase 2 API
+## API And Authorization
 
-| Method | Path | Purpose |
+| Access | Method and path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/showtimes` | List showtimes and movies |
-| `GET` | `/api/showtimes/:showtimeId/seats` | Resolve all seat states |
-| `POST` | `/api/showtimes/:showtimeId/seats/:seatNo/lock` | Acquire a lock |
-| `DELETE` | `/api/showtimes/:showtimeId/seats/:seatNo/lock` | Release an owned lock |
-| `POST` | `/api/bookings/confirm` | Confirm an owned lock as a booking |
-| `GET` | `/api/bookings/me` | List the current user's bookings |
+| Public | `GET /health`, `GET /api/health` | Dependency health |
+| Public | `GET /api/showtimes` | List showtimes and movies |
+| Public | `GET /api/showtimes/:showtimeId/seats` | Resolve all seat states |
+| Public | `GET /ws/showtimes/:showtimeId` | Public seat-state WebSocket |
+| `USER` or `ADMIN` | `POST /api/showtimes/:showtimeId/seats/:seatNo/lock` | Acquire a lock |
+| `USER` or `ADMIN` | `DELETE /api/showtimes/:showtimeId/seats/:seatNo/lock` | Release an owned lock |
+| `USER` or `ADMIN` | `POST /api/bookings/confirm` | Confirm an owned lock |
+| `USER` or `ADMIN` | `GET /api/bookings/me` | List the current user's bookings |
+| `ADMIN` | `GET /api/admin/bookings` | List confirmed bookings |
 
-Mutations and personal bookings use `X-User-ID` as temporary Phase 2 identity.
-`X-User-Role` is parsed for later phases but no admin API exists yet. Identity
-from request bodies is never trusted. Firebase verification replaces these
-headers in Phase 4.
+The admin endpoint accepts exact `user_id` filtering and a `limit` from 1 to
+100 (default 50). Results are newest first:
+
+```text
+GET /api/admin/bookings?user_id=firebase-uid&limit=25
+```
+
+Booking identity always comes from authenticated middleware. Request bodies
+cannot override user ID or role, and admin/WebSocket responses never expose
+Redis ownership tokens or Firebase credentials.
+
+## Authentication
+
+The backend supports two explicit modes:
+
+- `AUTH_MODE=development` reads `X-User-ID` and `X-User-Role`. A missing role
+  defaults to `USER`; only `USER` and `ADMIN` are accepted. This mode is an
+  intentionally insecure local convenience for reproducible one-command
+  Docker startup.
+- `AUTH_MODE=firebase` requires `Authorization: Bearer <Firebase ID token>`.
+  The official Firebase Admin SDK verifies the token and supplies the UID.
+  Development identity headers are ignored.
+
+Firebase mode maps the verified custom claim `role`. Exact `ADMIN` becomes
+`ADMIN`; all missing, malformed, unknown, or `USER` values become `USER`.
+Administrators must be assigned with trusted Firebase Admin tooling outside
+this public application, for example:
+
+```javascript
+await getAuth().setCustomUserClaims(uid, { role: 'ADMIN' })
+```
+
+There is no self-promotion endpoint or database-backed user-management system.
+
+The browser flow prepared for Phase 5 is:
+
+```text
+Google sign-in -> Firebase Auth -> current Firebase ID token
+-> Authorization bearer header -> Gin auth middleware
+-> verified application Identity -> booking/admin handler
+```
+
+Configure real backend Firebase mode with Application Default Credentials:
+
+```text
+AUTH_MODE=firebase
+FIREBASE_PROJECT_ID=your-project-id
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/firebase-service-account.json
+```
+
+Mount the credential file at runtime with a local Compose override or provide
+another supported Application Default Credentials source. Never commit the
+service-account JSON, place it in the Docker build context, or expose it
+through `VITE_*`. Firebase mode fails startup when its project or credentials
+cannot initialize; it never falls back to development mode.
+
+Frontend Firebase web configuration is public application configuration but
+still comes from environment variables:
+
+```text
+VITE_AUTH_MODE=firebase
+VITE_FIREBASE_API_KEY=
+VITE_FIREBASE_AUTH_DOMAIN=
+VITE_FIREBASE_PROJECT_ID=
+VITE_FIREBASE_APP_ID=
+```
+
+The frontend foundation provides Google popup sign-in, sign-out, auth-state
+observation, current ID-token retrieval, and an API client that attaches a
+fresh bearer token. Tokens are not written to `localStorage`. Development
+builds use `VITE_DEV_USER_ID` and `VITE_DEV_USER_ROLE` only for explicit local
+requests.
 
 Errors use:
 
@@ -74,7 +148,7 @@ Example lock and confirmation:
 $lock = Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8080/api/showtimes/showtime-1/seats/A1/lock `
-  -Headers @{"X-User-ID" = "demo-user"}
+  -Headers @{"X-User-ID" = "demo-user"; "X-User-Role" = "USER"}
 
 $body = @{
   showtime_id = "showtime-1"
@@ -85,7 +159,7 @@ $body = @{
 Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8080/api/bookings/confirm `
-  -Headers @{"X-User-ID" = "demo-user"} `
+  -Headers @{"X-User-ID" = "demo-user"; "X-User-Role" = "USER"} `
   -ContentType "application/json" `
   -Body $body
 ```
@@ -257,7 +331,9 @@ go run ./cmd/api
 ```
 
 Run the frontend separately with `npm install` and `npm run dev` from
-`frontend`. Vite preserves `/api` when proxying to port `8080`.
+`frontend`. Set `AUTH_MODE=development` and `VITE_AUTH_MODE=development` for
+the local header adapter. Vite preserves `/api`, `Authorization`, and
+development identity headers when proxying to port `8080`.
 
 ## Validation
 
@@ -295,7 +371,7 @@ different showtime room must receive none of those messages.
 
 ## Postman Collection
 
-The ordered Phase 2 workflow is available in `postman/`.
+The ordered Phase 4 development-auth workflow is available in `postman/`.
 
 1. Reset local state with `docker compose down --volumes`.
 2. Start the stack with `docker compose up --build`.
@@ -305,9 +381,11 @@ The ordered Phase 2 workflow is available in `postman/`.
 6. Use clean seeded data; the workflow expects all seats to begin as
    `AVAILABLE`.
 
-The collection validates health, catalog, seat maps, identity and validation
-errors, lock ownership and release, and booking confirmation. These Postman
-tests complement but do not replace the Go unit, race, or integration tests.
+The collection validates health, catalog, seat maps, authentication and
+validation errors, lock ownership, booking confirmation, admin rejection, an
+authorized admin listing, and the `user_id` filter. `firebaseIdToken` is an
+empty convenience variable; in Firebase mode use
+`Authorization: Bearer {{firebaseIdToken}}` without committing a real token.
 
 Frontend and Compose:
 
@@ -331,7 +409,7 @@ docker compose down
 backend/internal/audit/     Asynchronous MongoDB audit consumer
 backend/internal/booking/   Domain, service, handlers, MongoDB and Redis adapters
 backend/internal/events/    Event contract, Redis transport, expiration listener
-backend/internal/identity/  Temporary Phase 2 request identity
+backend/internal/identity/  Auth identity, roles, middleware, and Firebase adapter
 backend/internal/realtime/  WebSocket hub, clients, and public event projection
 backend/internal/health/    Dependency-aware health endpoint
 frontend/                   Vue scaffold and API proxies
@@ -340,9 +418,12 @@ docs/                       Assignment and architecture notes
 
 ## Current Limitations
 
-- Development headers are not secure authentication.
-- No Firebase Authentication, notification delivery, or admin API.
+- Development headers are not secure authentication and must not be used in production.
+- Firebase administrator claims are provisioned outside this application.
+- No notification delivery or database-backed user management.
 - The Vue screen remains the infrastructure status page; booking UI is Phase 5.
+- The Phase 5 login screen, route guards, seat map, lock countdown, mock
+  payment screen, and admin table are not implemented.
 - Payment is the mock confirmation action.
 - Redis/MongoDB confirmation is not a cross-system transaction.
 - A failed post-commit Redis `BOOKED` transition has no reconciliation worker;

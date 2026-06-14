@@ -50,10 +50,14 @@ this development-only boundary with verified Firebase claims.
 
 ## Phase 4 - Authentication and authorization
 
-- [ ] Add Firebase Authentication
-- [ ] Verify Firebase ID tokens in backend
-- [ ] Add `USER` and `ADMIN` roles
-- [ ] Protect admin APIs
+- [x] Add Firebase Authentication foundation
+- [x] Verify Firebase ID tokens in backend
+- [x] Add explicit development authentication mode
+- [x] Add `USER` and `ADMIN` roles
+- [x] Protect booking and admin APIs
+- [x] Add filtered admin bookings endpoint
+- [x] Add minimal frontend Firebase and authenticated API foundation
+- [x] Add auth, role, admin, regression, and configuration tests
 
 ## Phase 5 - Frontend MVP
 

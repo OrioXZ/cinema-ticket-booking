@@ -23,6 +23,7 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv("REDIS_URI", "redis://redis:6379/1")
 	t.Setenv("EVENT_CHANNEL", "custom.events")
 	t.Setenv("WEBSOCKET_ALLOWED_ORIGINS", "http://localhost:5173, http://localhost:4173")
+	t.Setenv("AUTH_MODE", "development")
 
 	cfg, err := Load()
 	if err != nil {
@@ -30,9 +31,46 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 
 	if cfg.AppEnv != "test" || cfg.Port != "9090" || cfg.MongoDatabase != "test" ||
-		cfg.EventChannel != "custom.events" || len(cfg.WebSocketOrigins) != 2 {
+		cfg.EventChannel != "custom.events" || len(cfg.WebSocketOrigins) != 2 ||
+		cfg.AuthMode != "development" {
 		t.Fatalf("Load() returned unexpected config: %+v", cfg)
 	}
+}
+
+func TestLoadAuthenticationMode(t *testing.T) {
+	setDependencies(t)
+
+	t.Run("development default", func(t *testing.T) {
+		t.Setenv("AUTH_MODE", "")
+		cfg, err := Load()
+		if err != nil || cfg.AuthMode != "development" {
+			t.Fatalf("Load() = %+v, %v", cfg, err)
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		t.Setenv("AUTH_MODE", "automatic")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() expected unsupported AUTH_MODE error")
+		}
+	})
+
+	t.Run("firebase requires project", func(t *testing.T) {
+		t.Setenv("AUTH_MODE", "firebase")
+		t.Setenv("FIREBASE_PROJECT_ID", "")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() expected missing Firebase project error")
+		}
+	})
+
+	t.Run("firebase", func(t *testing.T) {
+		t.Setenv("AUTH_MODE", "firebase")
+		t.Setenv("FIREBASE_PROJECT_ID", "cinema-project")
+		cfg, err := Load()
+		if err != nil || cfg.FirebaseProjectID != "cinema-project" {
+			t.Fatalf("Load() = %+v, %v", cfg, err)
+		}
+	})
 }
 
 func TestLoadRequiresMongoDatabaseWithMongoURI(t *testing.T) {
@@ -63,4 +101,11 @@ func TestLoadBuildsMongoURIFromEnvironment(t *testing.T) {
 	if cfg.MongoURI != want {
 		t.Fatalf("MongoURI = %q, want %q", cfg.MongoURI, want)
 	}
+}
+
+func setDependencies(t *testing.T) {
+	t.Helper()
+	t.Setenv("MONGO_URI", "mongodb://mongo/test")
+	t.Setenv("MONGO_DATABASE", "test")
+	t.Setenv("REDIS_URI", "redis://redis:6379/0")
 }

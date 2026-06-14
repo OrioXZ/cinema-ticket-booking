@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "4a777f48-cdaa-43cc-941f-67854fa11001",
     "name": "Cinema Ticket Booking",
-    "description": "Ordered Phase 2 API workflow. Run against clean seeded data with the Cinema Local environment selected.",
+    "description": "Ordered Phase 4 development-auth workflow. Run against clean seeded data with the Cinema Local environment selected. For Firebase mode, replace development identity headers with Authorization: Bearer {{firebaseIdToken}}; never store a real token in the collection.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -21,6 +21,22 @@
     {
       "key": "user2",
       "value": "user-2"
+    },
+    {
+      "key": "userRole",
+      "value": "USER"
+    },
+    {
+      "key": "adminUser",
+      "value": "admin-1"
+    },
+    {
+      "key": "adminRole",
+      "value": "ADMIN"
+    },
+    {
+      "key": "firebaseIdToken",
+      "value": ""
     },
     {
       "key": "showtimeId",
@@ -160,7 +176,7 @@
                 "exec": [
                   "pm.test('Status is 401', () => pm.response.to.have.status(401));",
                   "const body = pm.response.json();",
-                  "pm.test('Structured identity error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('IDENTITY_REQUIRED'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Structured authentication error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('INVALID_AUTH_TOKEN'); pm.expect(body.error.message).to.be.a('string'); });",
                   "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
                 ]
               }
@@ -661,6 +677,119 @@
                   "pm.test('Final seat map shape is valid', () => { pm.expect(body.seats).to.be.an('array').with.lengthOf(20); pm.expect(bookingSeat).to.exist; pm.expect(releaseSeat).to.exist; });",
                   "pm.test('Booking and release states are correct', () => { pm.expect(bookingSeat.state).to.eql('BOOKED'); pm.expect(releaseSeat.state).to.eql('AVAILABLE'); });",
                   "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 Admin Authorization",
+      "item": [
+        {
+          "name": "Anonymous Admin Request",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/admin/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Normal User Cannot List Admin Bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "X-User-Role",
+                "value": "{{userRole}}"
+              }
+            ],
+            "url": "{{baseUrl}}/admin/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Admin Lists Bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{adminUser}}"
+              },
+              {
+                "key": "X-User-Role",
+                "value": "{{adminRole}}"
+              }
+            ],
+            "url": "{{baseUrl}}/admin/bookings?limit=50"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Admin response contains bookings', () => { pm.expect(body.items).to.be.an('array'); pm.expect(body.items.some(item => item.id === pm.variables.get('bookingId'))).to.eql(true); });",
+                  "pm.test('Admin response contains no ownership token', () => pm.expect(pm.response.text()).not.to.include('ownership_token'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Admin Filters Bookings By User",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{adminUser}}"
+              },
+              {
+                "key": "X-User-Role",
+                "value": "{{adminRole}}"
+              }
+            ],
+            "url": "{{baseUrl}}/admin/bookings?user_id={{user1}}&limit=50"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Every booking belongs to selected user', () => body.items.forEach(item => pm.expect(item.user_id).to.eql(pm.variables.get('user1'))));"
                 ]
               }
             }

@@ -120,6 +120,35 @@ func TestRealMongoAndRedisConcurrency(t *testing.T) {
 	if !errors.Is(err, ErrDuplicateBooking) {
 		t.Fatalf("duplicate Create() error = %v, want ErrDuplicateBooking", err)
 	}
+
+	older := time.Now().UTC().Add(-time.Minute)
+	newer := time.Now().UTC()
+	for _, booking := range []Booking{
+		{
+			ID: "admin-old", ShowtimeID: "showtime-1", SeatNo: "A3",
+			UserID: "filter-user", Status: BookingStatusConfirmed, CreatedAt: older,
+		},
+		{
+			ID: "admin-new", ShowtimeID: "showtime-1", SeatNo: "A4",
+			UserID: "filter-user", Status: BookingStatusConfirmed, CreatedAt: newer,
+		},
+		{
+			ID: "admin-other", ShowtimeID: "showtime-1", SeatNo: "A5",
+			UserID: "other-user", Status: BookingStatusConfirmed, CreatedAt: newer.Add(time.Second),
+		},
+	} {
+		if err := repository.Create(ctx, booking); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adminBookings, err := repository.ListConfirmed(ctx, "filter-user", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adminBookings) != 2 || adminBookings[0].ID != "admin-new" ||
+		adminBookings[1].ID != "admin-old" {
+		t.Fatalf("admin filtered bookings = %#v", adminBookings)
+	}
 }
 
 func TestRealRedisGenerationTransitions(t *testing.T) {

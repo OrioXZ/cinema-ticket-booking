@@ -38,6 +38,20 @@ func run() error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 
+	var tokenVerifier identity.TokenVerifier
+	switch cfg.AuthMode {
+	case "development":
+		log.Printf("WARNING: development authentication is active; request identity headers are not production authentication")
+	case "firebase":
+		authStartupCtx, cancelAuthStartup := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
+		tokenVerifier, err = identity.NewFirebaseVerifier(authStartupCtx, cfg.FirebaseProjectID)
+		cancelAuthStartup()
+		if err != nil {
+			return fmt.Errorf("initialize firebase authentication")
+		}
+	}
+	authMiddleware := identity.NewMiddleware(cfg.AuthMode, tokenVerifier)
+
 	mongoStartupCtx, cancelMongoStartup := context.WithTimeout(context.Background(), cfg.DependencyTimeout)
 	mongoClient, err := mongodb.Connect(mongoStartupCtx, cfg.MongoURI)
 	cancelMongoStartup()
@@ -139,13 +153,19 @@ func run() error {
 	}()
 
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery(), identity.DevelopmentMiddleware())
+	router.Use(gin.Logger(), gin.Recovery())
 
 	healthHandler := health.NewHandler(mongoClient, redisClient, cfg.DependencyTimeout)
 	router.GET("/health", healthHandler.Get)
 	api := router.Group("/api")
 	api.GET("/health", healthHandler.Get)
-	bookingHandler.Register(api)
+	bookingHandler.RegisterPublic(api)
+	protected := api.Group("")
+	protected.Use(authMiddleware.RequireAuthenticated())
+	bookingHandler.RegisterProtected(protected)
+	admin := api.Group("/admin")
+	admin.Use(authMiddleware.RequireAuthenticated(), identity.RequireRole(identity.RoleAdmin))
+	bookingHandler.RegisterAdmin(admin)
 	router.GET("/ws/showtimes/:showtimeId", websocketHandler.Get)
 
 	server := &http.Server{

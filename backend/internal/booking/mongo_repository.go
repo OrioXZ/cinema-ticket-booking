@@ -162,3 +162,27 @@ func (r *MongoRepository) ListByUser(ctx context.Context, userID string) ([]Book
 	}
 	return bookings, nil
 }
+
+func (r *MongoRepository) ListConfirmed(ctx context.Context, userID string, limit int64) ([]Booking, error) {
+	filter := bson.M{"status": BookingStatusConfirmed}
+	if userID != "" {
+		filter["user_id"] = userID
+	}
+	cursor, err := r.database.Collection(bookingsCollection).Find(
+		ctx,
+		filter,
+		options.Find().
+			SetSort(bson.D{{Key: "created_at", Value: -1}}).
+			SetLimit(limit),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	bookings := make([]Booking, 0)
+	if err := cursor.All(ctx, &bookings); err != nil {
+		return nil, err
+	}
+	return bookings, nil
+}

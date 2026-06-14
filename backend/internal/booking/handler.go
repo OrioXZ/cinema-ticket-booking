@@ -3,6 +3,7 @@ package booking
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -18,13 +19,25 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
-func (h *Handler) Register(router *gin.RouterGroup) {
+const (
+	defaultAdminBookingLimit = 50
+	maxAdminBookingLimit     = 100
+)
+
+func (h *Handler) RegisterPublic(router *gin.RouterGroup) {
 	router.GET("/showtimes", h.listShowtimes)
 	router.GET("/showtimes/:showtimeId/seats", h.seatMap)
+}
+
+func (h *Handler) RegisterProtected(router *gin.RouterGroup) {
 	router.POST("/showtimes/:showtimeId/seats/:seatNo/lock", h.acquireLock)
 	router.DELETE("/showtimes/:showtimeId/seats/:seatNo/lock", h.releaseLock)
 	router.POST("/bookings/confirm", h.confirm)
 	router.GET("/bookings/me", h.myBookings)
+}
+
+func (h *Handler) RegisterAdmin(router *gin.RouterGroup) {
+	router.GET("/bookings", h.adminBookings)
 }
 
 func (h *Handler) listShowtimes(c *gin.Context) {
@@ -49,8 +62,9 @@ func (h *Handler) seatMap(c *gin.Context) {
 }
 
 func (h *Handler) acquireLock(c *gin.Context) {
-	requestIdentity, ok := identity.Require(c)
+	requestIdentity, ok := identity.FromContext(c)
 	if !ok {
+		writeStructuredError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 		return
 	}
 	lock, err := h.service.AcquireLock(
@@ -67,8 +81,9 @@ func (h *Handler) acquireLock(c *gin.Context) {
 }
 
 func (h *Handler) releaseLock(c *gin.Context) {
-	requestIdentity, ok := identity.Require(c)
+	requestIdentity, ok := identity.FromContext(c)
 	if !ok {
+		writeStructuredError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 		return
 	}
 	var request struct {
@@ -93,8 +108,9 @@ func (h *Handler) releaseLock(c *gin.Context) {
 }
 
 func (h *Handler) confirm(c *gin.Context) {
-	requestIdentity, ok := identity.Require(c)
+	requestIdentity, ok := identity.FromContext(c)
 	if !ok {
+		writeStructuredError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 		return
 	}
 	var request struct {
@@ -121,8 +137,9 @@ func (h *Handler) confirm(c *gin.Context) {
 }
 
 func (h *Handler) myBookings(c *gin.Context) {
-	requestIdentity, ok := identity.Require(c)
+	requestIdentity, ok := identity.FromContext(c)
 	if !ok {
+		writeStructuredError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 		return
 	}
 	bookings, err := h.service.MyBookings(c.Request.Context(), requestIdentity.UserID)
@@ -131,6 +148,28 @@ func (h *Handler) myBookings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"bookings": bookings})
+}
+
+func (h *Handler) adminBookings(c *gin.Context) {
+	limit := int64(defaultAdminBookingLimit)
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		parsed, err := strconv.ParseInt(rawLimit, 10, 64)
+		if err != nil || parsed < 1 || parsed > maxAdminBookingLimit {
+			writeRequestError(c, "limit must be an integer between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	bookings, err := h.service.AdminBookings(
+		c.Request.Context(),
+		strings.TrimSpace(c.Query("user_id")),
+		limit,
+	)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": bookings})
 }
 
 func writeError(c *gin.Context, err error) {
