@@ -1,13 +1,42 @@
 # Cinema Ticket Booking
 
-Phase 5 implementation of a cinema ticket booking take-home assignment. The
+Final take-home assignment implementation of a cinema ticket booking system. The
 application provides the core cinema domain, five-minute Redis seat locks,
 durable booking confirmation, Redis Pub/Sub events, realtime WebSocket seat
 updates, asynchronous MongoDB audit logs, Firebase authentication support,
 role authorization, a responsive booking UI, an admin bookings view, and
 Docker Compose setup.
 
-## Technology
+## System Architecture
+
+```mermaid
+flowchart LR
+    Browser["Browser<br/>Vue 3 frontend"]
+    Nginx["Nginx<br/>frontend + reverse proxy"]
+    API["Go + Gin backend<br/>REST and WebSocket"]
+    Mongo[("MongoDB<br/>bookings + audit logs")]
+    Redis[("Redis<br/>seat locks + Pub/Sub")]
+    Realtime["Realtime consumer"]
+    Audit["Audit consumer"]
+
+    Browser -->|"REST requests"| Nginx
+    Browser <-->|"WebSocket updates"| Nginx
+    Nginx -->|"HTTP proxy"| API
+    Nginx <-->|"WebSocket proxy"| API
+    API -->|"durable bookings"| Mongo
+    API -->|"atomic seat locks<br/>Lua transitions"| Redis
+    API -->|"publish events"| Redis
+    Redis -->|"cinema.events"| Realtime
+    Redis -->|"cinema.events"| Audit
+    Realtime -->|"showtime room updates"| API
+    Audit -->|"asynchronous audit records"| Mongo
+```
+
+MongoDB is the durable booking authority. Redis coordinates temporary seat
+ownership and carries transient events; it is not a substitute for durable
+booking storage.
+
+## Tech Stack Overview
 
 - Go 1.24 with Gin
 - Vue 3, TypeScript, and Vite
@@ -19,7 +48,7 @@ Docker Compose setup.
 - Nginx
 - Docker Compose
 
-## Quick Start
+## How to Run
 
 ```bash
 docker compose up --build
@@ -37,6 +66,16 @@ when `MONGO_URI` is supplied; Compose explicitly provides its development
 database value. Authentication defaults explicitly to local development mode,
 so evaluators can start the system without owning a Firebase project. Stop the
 stack with `docker compose down`.
+
+## Reviewer Quick Path
+
+1. Run `docker compose up --build` and open <http://localhost:5173>.
+2. Sign in as `user-1` with role `USER`.
+3. Open a second browser or incognito window and sign in as `user-2`.
+4. Lock and release a seat, then lock and confirm one while observing realtime
+   state changes in the other window.
+5. Check the confirmed record under **My Bookings**.
+6. Optionally sign in as `ADMIN` and inspect or filter the Admin booking list.
 
 ## Seeded Data
 
@@ -91,7 +130,7 @@ await getAuth().setCustomUserClaims(uid, { role: 'ADMIN' })
 
 There is no self-promotion endpoint or database-backed user-management system.
 
-The browser flow prepared for Phase 5 is:
+The Firebase browser authentication flow is:
 
 ```text
 Google sign-in -> Firebase Auth -> current Firebase ID token
@@ -128,23 +167,33 @@ The frontend foundation provides Google popup sign-in, sign-out, auth-state
 observation, current ID-token retrieval, and an API client that attaches a
 fresh bearer token. Tokens are not written to `localStorage`.
 
-## Frontend Flow
+## Booking Flow
 
 The default development build opens a local-auth login panel. Enter a user ID,
 then continue as `USER` or `ADMIN`; the session remains in memory only.
 Firebase mode instead presents Google sign-in and derives the displayed role
 from the verified token result. Backend authorization remains authoritative.
 
-After login:
+End-to-end booking behavior:
 
-1. The first seeded showtime and its authoritative seat map load.
-2. The browser connects to the showtime WebSocket room and reloads the map
-   after every connection or reconnection.
-3. Selecting an available seat creates one five-minute lock and shows a
-   server-time-based countdown.
-4. The user can release the lock or confirm mock payment.
-5. Confirmed bookings appear under **My Bookings**.
-6. An `ADMIN` session can list bookings and filter by exact user ID.
+1. The user signs in through development authentication or Firebase.
+2. The selected showtime and authoritative REST seat map load.
+3. Selecting an available seat asks the backend to acquire its Redis lock.
+4. Redis atomically grants the lock or rejects the competing request.
+5. A random ownership token and five-minute TTL protect the temporary
+   selection.
+6. The transition publishes a Redis Pub/Sub event.
+7. The realtime consumer forwards the state change to other clients over the
+   showtime WebSocket room.
+8. Mock payment confirmation verifies the current lock owner and token.
+9. MongoDB inserts the durable confirmed booking.
+10. MongoDB's unique `(showtime_id, seat_no)` index prevents a second durable
+    booking for the same seat and showtime.
+11. **My Bookings** and the authorized Admin view read durable booking data.
+
+The frontend keeps one active lock in memory, shows its server-based countdown,
+and allows the owner to release it or confirm mock payment. It reloads the
+authoritative seat map after each WebSocket connection or reconnection.
 
 Realtime messages update other open browsers without refresh. Duplicate event
 IDs and older revisions are ignored, while valid equal-revision transitions
@@ -183,7 +232,7 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-## Lock and Booking Correctness
+## Redis Lock Strategy
 
 Redis locks use:
 
@@ -222,10 +271,18 @@ and the API still returns the confirmed booking. Redis and MongoDB do not share
 a transaction, so this is not cross-system atomicity. These failures cannot
 permit two durable bookings because MongoDB remains authoritative.
 
-## Realtime Events
+## Message Queue / Event Bus
 
-Phase 3 publishes a versioned internal event envelope to Redis channel
-`cinema.events`:
+The project does **not** use a durable message queue. Redis Pub/Sub is a
+transient event bus on channel `cinema.events`. A realtime consumer forwards
+seat-state changes to WebSocket rooms, while an independent audit consumer
+writes asynchronous audit records to MongoDB.
+
+Pub/Sub can lose events while consumers are offline. REST and MongoDB remain
+authoritative, and the frontend reloads the REST seat map after every
+WebSocket connection or reconnection.
+
+The backend publishes this versioned internal event envelope:
 
 ```json
 {
@@ -302,7 +359,7 @@ notification. Stale markers cannot overwrite a newer lock or booking.
 Expiration events can still be missed while the backend is offline because
 Redis Pub/Sub and keyspace notifications are non-durable. Clients reload the
 authoritative REST seat map after reconnecting. No polling or reconciliation
-worker exists in Phase 3.
+worker exists.
 
 ## Audit Logs
 
@@ -354,6 +411,23 @@ Run the frontend separately with `npm install` and `npm run dev` from
 the local header adapter. Vite preserves `/api`, `Authorization`, and
 development identity headers when proxying to port `8080`.
 
+## Test Case Summary
+
+| Scenario | Expected result |
+| --- | --- |
+| Two users attempt the same seat | Only one Redis lock succeeds |
+| Wrong ownership token releases a lock | Request is rejected |
+| Lock expires | Seat returns to `AVAILABLE` |
+| Confirmed seat is booked again | Durable duplicate booking is rejected |
+| `USER` calls Admin API | `403 Forbidden` |
+| Unauthenticated protected request | `401 Unauthorized` |
+| WebSocket reconnects | Client reloads the authoritative REST seat map |
+| `LOCKED` to `BOOKED` with equal revision | Valid transition is still applied |
+
+These behaviors are covered by focused backend tests and/or the documented
+runtime validation paths. Test sources live under `backend/internal/**`, while
+frontend type-check/build and Docker checks are shown below.
+
 ## Validation
 
 Backend:
@@ -379,9 +453,9 @@ go test -tags=integration ./internal/...
 cd ..
 ```
 
-The integration test drops only `cinema_phase2_integration` and removes its
-known Redis lock keys. Phase 3 integration tests also use isolated audit
-databases and Redis channels.
+The booking integration test drops only `cinema_phase2_integration` and
+removes its known Redis lock keys. Realtime and audit integration tests also
+use isolated databases and Redis channels.
 
 To test realtime updates manually, connect one or more WebSocket clients to a
 showtime URL, then run the lock, release, and confirmation REST requests above.
@@ -390,7 +464,7 @@ different showtime room must receive none of those messages.
 
 ## Postman Collection
 
-The ordered Phase 4 development-auth workflow is available in `postman/`.
+The ordered development-auth workflow is available in `postman/`.
 
 1. Reset local state with `docker compose down --volumes`.
 2. Start the stack with `docker compose up --build`.
@@ -431,19 +505,22 @@ backend/internal/events/    Event contract, Redis transport, expiration listener
 backend/internal/identity/  Auth identity, roles, middleware, and Firebase adapter
 backend/internal/realtime/  WebSocket hub, clients, and public event projection
 backend/internal/health/    Dependency-aware health endpoint
-frontend/                   Vue scaffold and API proxies
+frontend/                   Vue booking application and API/WebSocket proxies
 docs/                       Assignment and architecture notes
 ```
 
-## Current Limitations
+## Assumptions & Trade-offs
 
-- Development headers are not secure authentication and must not be used in production.
+- Development authentication trusts local headers, is intentionally insecure,
+  and is exposed only on localhost by the default Compose configuration.
 - Firebase administrator claims are provisioned outside this application.
 - No notification delivery or database-backed user management.
 - The frontend uses a simple tabbed shell rather than a router or global state library.
 - Development authentication sessions are intentionally memory-only.
 - Payment is the mock confirmation action.
-- Redis/MongoDB confirmation is not a cross-system transaction.
-- A failed post-commit Redis `BOOKED` transition has no reconciliation worker;
+- MongoDB is the durable booking authority.
+- Redis and MongoDB do not share a cross-system transaction.
+- The post-commit Redis `BOOKED` projection is best effort. A failure has no
+  reconciliation worker;
   the REST seat map still resolves the durable MongoDB booking as `BOOKED`.
 - Redis Pub/Sub, WebSocket updates, and expiration notifications are transient.

@@ -72,6 +72,6 @@ this development-only boundary with verified Firebase claims.
 ## Phase 6 - Submission quality
 
 - [ ] Review concurrency behavior
-- [ ] Complete final README and architecture diagram
-- [ ] Document final assumptions and trade-offs
+- [x] Complete final README and architecture diagram
+- [x] Document final assumptions and trade-offs
 - [ ] Record demo video
