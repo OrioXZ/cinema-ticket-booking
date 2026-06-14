@@ -1,0 +1,672 @@
+{
+  "info": {
+    "_postman_id": "4a777f48-cdaa-43cc-941f-67854fa11001",
+    "name": "Cinema Ticket Booking",
+    "description": "Ordered Phase 2 API workflow. Run against clean seeded data with the Cinema Local environment selected.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080/api"
+    },
+    {
+      "key": "healthUrl",
+      "value": "http://localhost:8080/health"
+    },
+    {
+      "key": "user1",
+      "value": "user-1"
+    },
+    {
+      "key": "user2",
+      "value": "user-2"
+    },
+    {
+      "key": "showtimeId",
+      "value": "showtime-1"
+    },
+    {
+      "key": "bookingSeat",
+      "value": "A1"
+    },
+    {
+      "key": "releaseSeat",
+      "value": "A2"
+    },
+    {
+      "key": "lockToken",
+      "value": ""
+    },
+    {
+      "key": "releaseLockToken",
+      "value": ""
+    },
+    {
+      "key": "bookingId",
+      "value": ""
+    }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response contains no raw infrastructure failure details', () => { const text = pm.response.text().toLowerCase(); ['dial tcp', 'connection refused', 'server selection', 'no such host', 'context deadline exceeded', 'i/o timeout'].forEach(value => pm.expect(text).not.to.include(value)); });"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 Health",
+      "item": [
+        {
+          "name": "Backend Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{healthUrl}}",
+            "description": "Checks the application, MongoDB, and Redis health statuses."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Health response shape is valid', () => { pm.expect(body).to.be.an('object'); pm.expect(body.services).to.be.an('object'); });",
+                  "pm.test('All services are up', () => { pm.expect(body.status).to.eql('up'); pm.expect(body.services.application.status).to.eql('up'); pm.expect(body.services.mongodb.status).to.eql('up'); pm.expect(body.services.redis.status).to.eql('up'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 Catalog and Seat Map",
+      "item": [
+        {
+          "name": "List Showtimes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/showtimes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Showtime list shape is valid', () => { pm.expect(body.showtimes).to.be.an('array').that.is.not.empty; });",
+                  "pm.test('Seeded movie and showtime are present', () => { const entry = body.showtimes.find(value => value.showtime.id === 'showtime-1'); pm.expect(entry).to.exist; pm.expect(entry.movie.id).to.eql('movie-1'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Initial Seat Map",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats",
+            "description": "Assumes a clean database and no active locks."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const expectedSeats = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10'];",
+                  "pm.test('Seat map shape is valid', () => { pm.expect(body.showtime_id).to.eql(pm.variables.get('showtimeId')); pm.expect(body.seats).to.be.an('array').with.lengthOf(20); });",
+                  "pm.test('All configured seats are present', () => pm.expect(body.seats.map(seat => seat.seat_no)).to.have.members(expectedSeats));",
+                  "pm.test('All seats are initially available', () => body.seats.forEach(seat => pm.expect(seat.state).to.eql('AVAILABLE')));",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Identity and Validation Errors",
+      "item": [
+        {
+          "name": "Lock Without Identity",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/B10/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured identity error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('IDENTITY_REQUIRED'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Lock Invalid Seat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/Z9/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured invalid-seat error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('INVALID_SEAT'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Lock Unknown Showtime",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/unknown-showtime/seats/A1/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 404', () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured showtime error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('SHOWTIME_NOT_FOUND'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm Without Active Lock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"showtime_id\": \"{{showtimeId}}\",\n  \"seat_no\": \"A3\",\n  \"ownership_token\": \"missing-token\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/bookings/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured inactive-lock error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('LOCK_NOT_ACTIVE'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 Lock Ownership and Release",
+      "item": [
+        {
+          "name": "Acquire Release Seat Lock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{releaseSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Lock response shape and values are valid', () => { pm.expect(body.showtime_id).to.eql(pm.variables.get('showtimeId')); pm.expect(body.seat_no).to.eql(pm.variables.get('releaseSeat')); pm.expect(body.user_id).to.eql(pm.variables.get('user1')); pm.expect(body.ownership_token).to.be.a('string').and.not.empty; pm.expect(body.expires_at).to.be.a('string'); pm.expect(Date.parse(body.expires_at)).to.be.above(Date.now()); });",
+                  "if (pm.environment && pm.environment.get('baseUrl')) { pm.environment.set('releaseLockToken', body.ownership_token); }",
+                  "pm.collectionVariables.set('releaseLockToken', body.ownership_token);",
+                  "pm.test('Release token was captured', () => pm.expect(pm.variables.get('releaseLockToken')).to.eql(body.ownership_token));",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Competing User Cannot Lock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user2}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{releaseSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured seat conflict is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('SEAT_CONFLICT'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Release With Wrong Token",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"ownership_token\":\"wrong-token\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{releaseSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 403', () => pm.response.to.have.status(403));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured ownership error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('LOCK_NOT_OWNED'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Release With Correct Token",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"ownership_token\":\"{{releaseLockToken}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{releaseSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 204', () => pm.response.to.have.status(204));",
+                  "pm.test('Successful release has an empty response body', () => pm.expect(pm.response.text()).to.eql(''));",
+                  "pm.test('Release token was available', () => pm.expect(pm.variables.get('releaseLockToken')).to.be.a('string').and.not.empty);",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Released Seat Is Available",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const seat = body.seats.find(value => value.seat_no === pm.variables.get('releaseSeat'));",
+                  "pm.test('Seat map shape is valid', () => { pm.expect(body.seats).to.be.an('array').with.lengthOf(20); pm.expect(seat).to.exist; });",
+                  "pm.test('Released seat is available', () => pm.expect(seat.state).to.eql('AVAILABLE'));",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 Booking Flow",
+      "item": [
+        {
+          "name": "Acquire Booking Seat Lock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{bookingSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Lock response shape and values are valid', () => { pm.expect(body.showtime_id).to.eql(pm.variables.get('showtimeId')); pm.expect(body.seat_no).to.eql(pm.variables.get('bookingSeat')); pm.expect(body.user_id).to.eql(pm.variables.get('user1')); pm.expect(body.ownership_token).to.be.a('string').and.not.empty; pm.expect(Date.parse(body.expires_at)).to.be.above(Date.now()); });",
+                  "if (pm.environment && pm.environment.get('baseUrl')) { pm.environment.set('lockToken', body.ownership_token); }",
+                  "pm.collectionVariables.set('lockToken', body.ownership_token);",
+                  "pm.test('Booking lock token was captured', () => pm.expect(pm.variables.get('lockToken')).to.eql(body.ownership_token));",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wrong User Cannot Confirm",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user2}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"showtime_id\": \"{{showtimeId}}\",\n  \"seat_no\": \"{{bookingSeat}}\",\n  \"ownership_token\": \"{{lockToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/bookings/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 403', () => pm.response.to.have.status(403));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured ownership error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('LOCK_NOT_OWNED'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wrong Token Cannot Confirm",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"showtime_id\": \"{{showtimeId}}\",\n  \"seat_no\": \"{{bookingSeat}}\",\n  \"ownership_token\": \"wrong-token\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/bookings/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 403', () => pm.response.to.have.status(403));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured ownership error is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('LOCK_NOT_OWNED'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"showtime_id\": \"{{showtimeId}}\",\n  \"seat_no\": \"{{bookingSeat}}\",\n  \"ownership_token\": \"{{lockToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/bookings/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Confirmed booking shape and values are valid', () => { pm.expect(body.id).to.be.a('string').and.not.empty; pm.expect(body.showtime_id).to.eql(pm.variables.get('showtimeId')); pm.expect(body.seat_no).to.eql(pm.variables.get('bookingSeat')); pm.expect(body.user_id).to.eql(pm.variables.get('user1')); pm.expect(body.status).to.eql('CONFIRMED'); pm.expect(body.created_at).to.be.a('string'); });",
+                  "if (pm.environment && pm.environment.get('baseUrl')) { pm.environment.set('bookingId', body.id); }",
+                  "pm.collectionVariables.set('bookingId', body.id);",
+                  "pm.test('Booking ID was captured', () => pm.expect(pm.variables.get('bookingId')).to.eql(body.id));",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get My Bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user1}}"
+              }
+            ],
+            "url": "{{baseUrl}}/bookings/me"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const booking = body.bookings.find(value => value.id === pm.variables.get('bookingId'));",
+                  "pm.test('Booking list shape is valid', () => pm.expect(body.bookings).to.be.an('array'));",
+                  "pm.test('Saved confirmed booking is returned', () => { pm.expect(booking).to.exist; pm.expect(booking.status).to.eql('CONFIRMED'); pm.expect(booking.seat_no).to.eql(pm.variables.get('bookingSeat')); pm.expect(booking.user_id).to.eql(pm.variables.get('user1')); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Booked Seat Cannot Be Locked",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-ID",
+                "value": "{{user2}}"
+              }
+            ],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats/{{bookingSeat}}/lock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 409', () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test('Structured seat conflict is returned', () => { pm.expect(body.error).to.be.an('object'); pm.expect(body.error.code).to.eql('SEAT_CONFLICT'); pm.expect(body.error.message).to.be.a('string'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Final Seat Map",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/showtimes/{{showtimeId}}/seats"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const bookingSeat = body.seats.find(value => value.seat_no === pm.variables.get('bookingSeat'));",
+                  "const releaseSeat = body.seats.find(value => value.seat_no === pm.variables.get('releaseSeat'));",
+                  "pm.test('Final seat map shape is valid', () => { pm.expect(body.seats).to.be.an('array').with.lengthOf(20); pm.expect(bookingSeat).to.exist; pm.expect(releaseSeat).to.exist; });",
+                  "pm.test('Booking and release states are correct', () => { pm.expect(bookingSeat.state).to.eql('BOOKED'); pm.expect(releaseSeat.state).to.eql('AVAILABLE'); });",
+                  "pm.test('Response does not expose infrastructure details', () => { const text = pm.response.text().toLowerCase(); ['mongodb://', 'redis://', 'mongo_uri', 'redis_uri', 'password', 'credential'].forEach(value => pm.expect(text).not.to.include(value)); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -160,6 +160,22 @@ cd ..
 The integration test drops only `cinema_phase2_integration` and removes its
 known Redis lock keys.
 
+## Postman Collection
+
+The ordered Phase 2 workflow is available in `postman/`.
+
+1. Reset local state with `docker compose down --volumes`.
+2. Start the stack with `docker compose up --build`.
+3. Import both JSON files from `postman/` into Postman.
+4. Select the `Cinema Local` environment.
+5. Run the `Cinema Ticket Booking` collection in order.
+6. Use clean seeded data; the workflow expects all seats to begin as
+   `AVAILABLE`.
+
+The collection validates health, catalog, seat maps, identity and validation
+errors, lock ownership and release, and booking confirmation. These Postman
+tests complement but do not replace the Go unit, race, or integration tests.
+
 Frontend and Compose:
 
 ```powershell
