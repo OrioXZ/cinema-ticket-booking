@@ -84,7 +84,9 @@ Run Go formatting, tests, and build:
 ```powershell
 cd backend
 gofmt -w cmd internal
+go mod tidy
 go test ./...
+go test -race ./internal/...
 go build -o bin/api.exe ./cmd/api
 cd ..
 ```

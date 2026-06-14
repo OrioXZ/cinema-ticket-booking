@@ -337,6 +337,10 @@ func (s *Service) MyBookings(ctx context.Context, userID string) ([]Booking, err
 	return s.bookings.ListByUser(ctx, userID)
 }
 
+func (s *Service) AdminBookings(ctx context.Context, userID string, limit int64) ([]Booking, error) {
+	return s.bookings.ListConfirmed(ctx, strings.TrimSpace(userID), limit)
+}
+
 func (s *Service) validateSeat(ctx context.Context, showtimeID, seatNo string) (Showtime, error) {
 	showtimeID = strings.TrimSpace(showtimeID)
 	seatNo = strings.ToUpper(strings.TrimSpace(seatNo))

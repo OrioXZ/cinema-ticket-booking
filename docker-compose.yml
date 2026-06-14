@@ -53,6 +53,9 @@ services:
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-development}
+      AUTH_MODE: ${AUTH_MODE:-development}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
       BACKEND_PORT: "8080"
       MONGO_DATABASE: *mongo-database
       MONGO_HOST: "mongodb:27017"
@@ -62,7 +65,7 @@ services:
       EVENT_CHANNEL: ${EVENT_CHANNEL:-cinema.events}
       WEBSOCKET_ALLOWED_ORIGINS: ${WEBSOCKET_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
-      - "${BACKEND_PORT:-8080}:8080"
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -78,9 +81,17 @@ services:
   frontend:
     build:
       context: ./frontend
+      args:
+        VITE_AUTH_MODE: ${VITE_AUTH_MODE:-development}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_DEV_USER_ID: ${VITE_DEV_USER_ID:-user-1}
+        VITE_DEV_USER_ROLE: ${VITE_DEV_USER_ROLE:-USER}
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
     depends_on:
       backend:
         condition: service_healthy

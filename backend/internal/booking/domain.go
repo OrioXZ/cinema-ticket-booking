@@ -103,6 +103,7 @@ type BookingRepository interface {
 	IsBooked(context.Context, string, string) (bool, error)
 	Create(context.Context, Booking) error
 	ListByUser(context.Context, string) ([]Booking, error)
+	ListConfirmed(context.Context, string, int64) ([]Booking, error)
 }
 
 type LockRepository interface {

@@ -13,6 +13,8 @@ const defaultDependencyTimeout = 3 * time.Second
 type Config struct {
 	AppEnv            string
 	Port              string
+	AuthMode          string
+	FirebaseProjectID string
 	MongoURI          string
 	MongoDatabase     string
 	RedisURI          string
@@ -35,6 +37,8 @@ func Load() (Config, error) {
 	cfg := Config{
 		AppEnv:            valueOrDefault("APP_ENV", "development"),
 		Port:              valueOrDefault("BACKEND_PORT", "8080"),
+		AuthMode:          strings.ToLower(valueOrDefault("AUTH_MODE", "development")),
+		FirebaseProjectID: strings.TrimSpace(os.Getenv("FIREBASE_PROJECT_ID")),
 		MongoURI:          mongoURI,
 		MongoDatabase:     mongoDatabase,
 		RedisURI:          os.Getenv("REDIS_URI"),
@@ -45,6 +49,15 @@ func Load() (Config, error) {
 
 	if cfg.RedisURI == "" {
 		return Config{}, fmt.Errorf("REDIS_URI is required")
+	}
+	switch cfg.AuthMode {
+	case "development":
+	case "firebase":
+		if cfg.FirebaseProjectID == "" {
+			return Config{}, fmt.Errorf("FIREBASE_PROJECT_ID is required when AUTH_MODE=firebase")
+		}
+	default:
+		return Config{}, fmt.Errorf("AUTH_MODE must be development or firebase")
 	}
 
 	return cfg, nil

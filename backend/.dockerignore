@@ -3,3 +3,7 @@ api.exe
 bin/
 coverage.out
 Dockerfile
+.env
+.env.*
+*service-account*.json
+*firebase-credentials*.json

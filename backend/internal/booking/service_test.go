@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -452,6 +453,23 @@ func (f *fakeBookings) ListByUser(_ context.Context, userID string) ([]Booking, 
 	for _, item := range f.items {
 		if item.UserID == userID {
 			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeBookings) ListConfirmed(_ context.Context, userID string, limit int64) ([]Booking, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	items := append([]Booking(nil), f.items...)
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	var result []Booking
+	for _, item := range items {
+		if item.Status == BookingStatusConfirmed && (userID == "" || item.UserID == userID) {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
 		}
 	}
 	return result, nil
