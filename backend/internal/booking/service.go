@@ -57,6 +57,12 @@ func (s *Service) SeatMap(ctx context.Context, showtimeID string) ([]Seat, error
 	if err != nil {
 		return nil, err
 	}
+	projections, err := s.locks.GetProjections(ctx, showtimeID, showtime.Seats)
+	if err != nil {
+		return nil, err
+	}
+	// Read projections before active locks. If an acquire or release lands between
+	// these reads, the active lock check is the safer final transient override.
 	locked, err := s.locks.GetMany(ctx, showtimeID, showtime.Seats)
 	if err != nil {
 		return nil, err
@@ -65,13 +71,19 @@ func (s *Service) SeatMap(ctx context.Context, showtimeID string) ([]Seat, error
 	seats := make([]Seat, 0, len(showtime.Seats))
 	for _, seatNo := range showtime.Seats {
 		state := SeatStateAvailable
-		if _, ok := locked[seatNo]; ok {
+		projection := projections[seatNo]
+		revision := projection.Revision
+		if projection.State == SeatStateBooked {
+			state = SeatStateBooked
+		}
+		if lock, ok := locked[seatNo]; ok && state != SeatStateBooked {
 			state = SeatStateLocked
+			revision = lock.Generation
 		}
 		if _, ok := booked[seatNo]; ok {
 			state = SeatStateBooked
 		}
-		seats = append(seats, Seat{SeatNo: seatNo, State: state})
+		seats = append(seats, Seat{SeatNo: seatNo, State: state, Revision: revision})
 	}
 	return seats, nil
 }

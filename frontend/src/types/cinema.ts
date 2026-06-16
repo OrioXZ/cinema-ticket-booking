@@ -23,6 +23,7 @@ export type ShowtimeSummary = {
 export type Seat = {
   seat_no: string
   state: SeatState
+  revision: number
 }
 
 export type SeatLock = {
@@ -31,6 +32,7 @@ export type SeatLock = {
   user_id: string
   ownership_token: string
   expires_at: string
+  revision: number
 }
 
 export type Booking = {

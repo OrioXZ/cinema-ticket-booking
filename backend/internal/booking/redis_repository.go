@@ -235,6 +235,45 @@ func (r *RedisLockRepository) GetMany(
 	return locks, nil
 }
 
+func (r *RedisLockRepository) GetProjections(
+	ctx context.Context,
+	showtimeID string,
+	seatNos []string,
+) (map[string]SeatProjection, error) {
+	if len(seatNos) == 0 {
+		return map[string]SeatProjection{}, nil
+	}
+	pipe := r.client.Pipeline()
+	commands := make([]*goredis.SliceCmd, len(seatNos))
+	for i, seatNo := range seatNos {
+		commands[i] = pipe.HMGet(ctx, realtimeStateKey(showtimeID, seatNo), "state", "generation")
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, err
+	}
+
+	projections := make(map[string]SeatProjection)
+	for i, command := range commands {
+		values, err := command.Result()
+		if err != nil && err != goredis.Nil {
+			return nil, err
+		}
+		if len(values) != 2 || values[0] == nil || values[1] == nil {
+			continue
+		}
+		state, ok := values[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected Redis projection state type %T", values[0])
+		}
+		generation, err := redisInt64(values[1])
+		if err != nil {
+			return nil, err
+		}
+		projections[seatNos[i]] = SeatProjection{State: state, Revision: generation}
+	}
+	return projections, nil
+}
+
 func (r *RedisLockRepository) VerifyOwnership(
 	ctx context.Context,
 	lock SeatLock,

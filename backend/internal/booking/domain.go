@@ -69,12 +69,18 @@ type SeatLock struct {
 	UserID         string    `json:"user_id"`
 	OwnershipToken string    `json:"ownership_token"`
 	ExpiresAt      time.Time `json:"expires_at"`
-	Generation     int64     `json:"-"`
+	Generation     int64     `json:"revision"`
 }
 
 type Seat struct {
-	SeatNo string `json:"seat_no"`
-	State  string `json:"state"`
+	SeatNo   string `json:"seat_no"`
+	State    string `json:"state"`
+	Revision int64  `json:"revision"`
+}
+
+type SeatProjection struct {
+	State    string
+	Revision int64
 }
 
 type ReleaseResult int
@@ -110,6 +116,7 @@ type LockRepository interface {
 	Acquire(context.Context, SeatLock, time.Duration, events.DomainEvent) (bool, int64, error)
 	Get(context.Context, string, string) (*SeatLock, error)
 	GetMany(context.Context, string, []string) (map[string]SeatLock, error)
+	GetProjections(context.Context, string, []string) (map[string]SeatProjection, error)
 	VerifyOwnership(context.Context, SeatLock) (OwnershipResult, int64, error)
 	Release(context.Context, SeatLock, events.DomainEvent) (ReleaseResult, error)
 	Confirm(context.Context, SeatLock, events.DomainEvent) error

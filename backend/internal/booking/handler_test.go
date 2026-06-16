@@ -154,6 +154,13 @@ func TestHandlerSuccessStatuses(t *testing.T) {
 		if response.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201; body = %s", response.Code, response.Body.String())
 		}
+		var lock SeatLock
+		if err := json.Unmarshal(response.Body.Bytes(), &lock); err != nil {
+			t.Fatal(err)
+		}
+		if lock.Generation == 0 || !bytes.Contains(response.Body.Bytes(), []byte(`"revision"`)) {
+			t.Fatalf("lock response did not expose revision: %s", response.Body.String())
+		}
 	})
 
 	t.Run("confirmation", func(t *testing.T) {
