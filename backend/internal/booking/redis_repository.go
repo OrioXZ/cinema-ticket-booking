@@ -13,6 +13,22 @@ import (
 
 const expirationMarkerGrace = time.Second
 
+// Redis seat-state transitions:
+//
+// Operation | State before | Required conditions | State after | Keys affected | Event | Stale-generation behavior
+// Acquire | AVAILABLE or absent | Seat is not BOOKED and no active lock exists | LOCKED | lock, generation counter, realtime state, expiration marker | seat.locked | Allocates a new generation so older release/expiry work cannot match.
+// Release | LOCKED | Active lock exists and user ID plus ownership token match | AVAILABLE | lock, realtime state, expiration marker | seat.released | Publishes AVAILABLE only when realtime state is still LOCKED at the lock generation.
+// Verify ownership | LOCKED | Active lock exists and user ID plus ownership token match | unchanged | lock | none | Returns the lock generation without extending TTL or changing state.
+// Mark booked after durable commit | LOCKED, AVAILABLE, or absent | MongoDB booking commit already succeeded; a positive generation can be recovered | BOOKED | lock, generation counter, realtime state, expiration marker | booking.confirmed | Uses the greatest known generation so BOOKED wins over delayed older work.
+// Publish expiration | LOCKED | Expired marker generation is still the active LOCKED generation and no lock key remains | AVAILABLE | lock, realtime state | seat.lock_expired | Ignores old marker generations and terminal BOOKED state.
+//
+// Key roles:
+// - lock: seat_lock:{showtimeId}:{seatNo}
+// - generation counter: seat_lock_generation:{showtimeId}:{seatNo}
+// - realtime state: seat_realtime_state:{showtimeId}:{seatNo}
+// - expiration marker: seat_lock_expiry:{showtimeId}:{seatNo}:{generation}
+
+// Acquire creates a lock, records the next generation, and publishes LOCKED atomically.
 var acquireScript = goredis.NewScript(`
 if redis.call("HGET", KEYS[3], "state") == "BOOKED" then
   return {0, 0}
@@ -35,6 +51,7 @@ redis.call("PUBLISH", ARGV[5], cjson.encode(event))
 return {1, generation}
 `)
 
+// Release removes an owned lock and publishes AVAILABLE only for the same generation.
 var releaseScript = goredis.NewScript(`
 local current = redis.call("GET", KEYS[1])
 if not current then
@@ -60,6 +77,7 @@ end
 return 1
 `)
 
+// VerifyOwnership checks the active lock owner without refreshing TTL or publishing.
 var verifyOwnershipScript = goredis.NewScript(`
 local current = redis.call("GET", KEYS[1])
 if not current then
@@ -72,6 +90,7 @@ end
 return {1, tonumber(lock["generation"])}
 `)
 
+// Confirm marks Redis BOOKED after MongoDB has durably accepted the booking.
 var confirmScript = goredis.NewScript(`
 local generation = tonumber(ARGV[1])
 local stateGeneration = tonumber(redis.call("HGET", KEYS[3], "generation") or "0")
@@ -106,6 +125,7 @@ redis.call("PUBLISH", ARGV[3], cjson.encode(event))
 return generation
 `)
 
+// Expire publishes AVAILABLE only when the expired marker still owns the LOCKED generation.
 var expireScript = goredis.NewScript(`
 local state = redis.call("HGET", KEYS[2], "state")
 if state == "BOOKED" then
@@ -184,21 +204,6 @@ func (r *RedisLockRepository) Acquire(
 		return false, 0, err
 	}
 	return acquired == 1, generation, nil
-}
-
-func (r *RedisLockRepository) Get(ctx context.Context, showtimeID, seatNo string) (*SeatLock, error) {
-	value, err := r.client.Get(ctx, lockKey(showtimeID, seatNo)).Result()
-	if err == goredis.Nil {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	lock, err := decodeLock(showtimeID, seatNo, value)
-	if err != nil {
-		return nil, err
-	}
-	return &lock, nil
 }
 
 func (r *RedisLockRepository) GetMany(
@@ -327,7 +332,7 @@ func (r *RedisLockRepository) Release(
 	return ReleaseResult(result), nil
 }
 
-func (r *RedisLockRepository) Confirm(
+func (r *RedisLockRepository) MarkBookedAfterDurableCommit(
 	ctx context.Context,
 	lock SeatLock,
 	event events.DomainEvent,

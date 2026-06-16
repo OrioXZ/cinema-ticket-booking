@@ -1,19 +1,21 @@
 # Architecture
 
-Status: Phase 4 implemented
+Status: MVP implemented
 
 ## Components
 
-- Vue 3 frontend scaffold with HTTP and WebSocket proxying
+- Vue 3 booking application with development/Firebase sign-in, seat map,
+  booking flow, personal bookings, and admin bookings view
 - Go + Gin REST API and WebSocket endpoint
 - MongoDB for movies, showtimes, bookings, and audit logs
 - Redis for temporary seat locks, Pub/Sub, and expiration notifications
+- Nginx frontend container with HTTP and WebSocket proxying
 - Docker Compose for the complete local stack
 - Firebase Authentication with explicit development fallback mode
 
 Package boundaries:
 
-- `internal/booking`: Phase 2 domain, REST service, repositories, and handlers
+- `internal/booking`: domain, REST service, repositories, and handlers
 - `internal/events`: versioned domain events, Redis publisher/subscriber, and
   seat-lock expiration listener
 - `internal/audit`: asynchronous audit projection and MongoDB repository
@@ -22,7 +24,7 @@ Package boundaries:
 - `internal/identity`: application identity, roles, middleware, development
   adapter, and Firebase Admin verifier
 
-Notifications and the final booking/admin frontend remain deferred.
+Mock notification delivery remains out of scope.
 
 ## Authentication And Authorization
 
@@ -151,17 +153,16 @@ Each seat uses a lock key, persistent generation key, realtime-state hash, and
 generation-bearing expiration marker. Acquire, release, confirmation, and
 expiration are separate Lua transitions. Each script updates Redis state and
 publishes its public event atomically. Generations prevent delayed release or
-expiry work from overwriting a newer generation. `BOOKED` is terminal for
-Phase 3.
+expiry work from overwriting a newer generation. `BOOKED` is terminal for the
+application.
 
 ## Booking Correctness
 
-Phase 2 correctness remains unchanged. Redis lock ownership protects temporary
-selection, while MongoDB's unique `(showtime_id, seat_no)` index is the final
-double-booking barrier. MongoDB booking insertion remains the durable
-confirmation success point. The post-commit Redis `BOOKED` transition and
-cleanup remain best effort; this is not a distributed transaction or
-cross-system atomicity guarantee.
+Redis lock ownership protects temporary selection, while MongoDB's unique
+`(showtime_id, seat_no)` index is the final double-booking barrier. MongoDB
+booking insertion remains the durable confirmation success point. The
+post-commit Redis `BOOKED` transition and cleanup remain best effort; this is
+not a distributed transaction or cross-system atomicity guarantee.
 
 ## Lifecycle
 
@@ -186,5 +187,4 @@ Background runtime errors are logged without calling `log.Fatal`.
 Redis Pub/Sub and keyspace notifications are non-durable. Events can be missed
 while the backend or a consumer is offline, and disconnected WebSocket clients
 receive no backlog. Clients must reload the authoritative REST seat map after
-every connect or reconnect. No polling, reconciliation, or durable broker is
-implemented in Phase 3.
+every connect or reconnect. No polling, background server-side reconciliation, or durable broker is implemented.

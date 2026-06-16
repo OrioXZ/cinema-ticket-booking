@@ -590,18 +590,6 @@ func (f *fakeLocks) Acquire(
 	return true, lock.Generation, nil
 }
 
-func (f *fakeLocks) Get(_ context.Context, showtimeID, seatNo string) (*SeatLock, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.removeExpired()
-	entry, exists := f.items[lockKey(showtimeID, seatNo)]
-	if !exists {
-		return nil, nil
-	}
-	lock := entry.lock
-	return &lock, nil
-}
-
 func (f *fakeLocks) GetMany(_ context.Context, showtimeID string, seatNos []string) (map[string]SeatLock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -682,7 +670,7 @@ func (f *fakeLocks) Release(
 	return ReleaseSucceeded, nil
 }
 
-func (f *fakeLocks) Confirm(
+func (f *fakeLocks) MarkBookedAfterDurableCommit(
 	ctx context.Context,
 	lock SeatLock,
 	event events.DomainEvent,

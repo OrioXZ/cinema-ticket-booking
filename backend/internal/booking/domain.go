@@ -114,10 +114,9 @@ type BookingRepository interface {
 
 type LockRepository interface {
 	Acquire(context.Context, SeatLock, time.Duration, events.DomainEvent) (bool, int64, error)
-	Get(context.Context, string, string) (*SeatLock, error)
 	GetMany(context.Context, string, []string) (map[string]SeatLock, error)
 	GetProjections(context.Context, string, []string) (map[string]SeatProjection, error)
 	VerifyOwnership(context.Context, SeatLock) (OwnershipResult, int64, error)
 	Release(context.Context, SeatLock, events.DomainEvent) (ReleaseResult, error)
-	Confirm(context.Context, SeatLock, events.DomainEvent) error
+	MarkBookedAfterDurableCommit(context.Context, SeatLock, events.DomainEvent) error
 }
