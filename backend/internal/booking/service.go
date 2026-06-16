@@ -153,7 +153,7 @@ func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID st
 		)
 		if eventErr != nil {
 			s.releaseAfterFailedAcquire(ctx, lock)
-		} else if confirmErr := s.locks.Confirm(ctx, lock, bookedEvent); confirmErr != nil {
+		} else if confirmErr := s.locks.MarkBookedAfterDurableCommit(ctx, lock, bookedEvent); confirmErr != nil {
 			s.logger.Printf(
 				"durable booking detected but Redis BOOKED correction failed for showtime %q seat %q",
 				showtimeID,
@@ -260,7 +260,7 @@ func (s *Service) Confirm(ctx context.Context, showtimeID, seatNo, userID, token
 		)
 		return confirmed, nil
 	}
-	if err := s.locks.Confirm(ctx, lock, confirmedEvent); err != nil {
+	if err := s.locks.MarkBookedAfterDurableCommit(ctx, lock, confirmedEvent); err != nil {
 		s.logger.Printf(
 			"booking committed but Redis BOOKED transition failed for showtime %q seat %q",
 			showtimeID,

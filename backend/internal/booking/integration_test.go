@@ -291,12 +291,12 @@ func TestRealRedisGenerationTransitions(t *testing.T) {
 	); err != nil || result != ReleaseNotOwned {
 		t.Fatalf("stale-token Release() = %v, %v", result, err)
 	}
-	if err := repository.Confirm(
+	if err := repository.MarkBookedAfterDurableCommit(
 		ctx,
 		newer,
 		transitionEvent(t, events.BookingConfirmed, newer, "booking-1"),
 	); err != nil {
-		t.Fatalf("Confirm() error = %v", err)
+		t.Fatalf("MarkBookedAfterDurableCommit() error = %v", err)
 	}
 	assertTransition(t, messages, events.BookingConfirmed, newerGeneration)
 	newerMarker := expirationMarkerPrefix(showtimeID, "A1") + fmt.Sprint(newerGeneration)
@@ -354,7 +354,7 @@ func TestRealRedisGenerationTransitions(t *testing.T) {
 		t.Fatalf("PublishExpiration() = %v, %v", published, err)
 	}
 	assertTransition(t, messages, events.SeatLockExpired, expiringGeneration)
-	if err := repository.Confirm(
+	if err := repository.MarkBookedAfterDurableCommit(
 		ctx,
 		expiring,
 		transitionEvent(t, events.BookingConfirmed, expiring, "booking-2"),
