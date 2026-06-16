@@ -7,6 +7,25 @@ export type APIRequestOptions = Omit<RequestInit, 'headers'> & {
   authenticated?: boolean
 }
 
+let serverClockOffsetMs = 0
+let hasServerClockSample = false
+
+function captureServerClock(response: Response, requestStartedAt: number, responseReceivedAt: number) {
+  const rawDate = response.headers.get('Date')
+  if (!rawDate) return
+
+  const serverTimestamp = Date.parse(rawDate)
+  if (!Number.isFinite(serverTimestamp)) return
+
+  const clientMidpoint = requestStartedAt + (responseReceivedAt - requestStartedAt) / 2
+  serverClockOffsetMs = serverTimestamp - clientMidpoint
+  hasServerClockSample = true
+}
+
+export function serverNow(): number {
+  return Date.now() + (hasServerClockSample ? serverClockOffsetMs : 0)
+}
+
 export async function apiRequest(
   path: string,
   options: APIRequestOptions = {},
@@ -30,10 +49,13 @@ export async function apiRequest(
     }
   }
 
-  return fetch(`/api${path.startsWith('/') ? path : `/${path}`}`, {
+  const requestStartedAt = Date.now()
+  const response = await fetch(`/api${path.startsWith('/') ? path : `/${path}`}`, {
     ...requestOptions,
     headers,
   })
+  captureServerClock(response, requestStartedAt, Date.now())
+  return response
 }
 
 export class APIError extends Error {
