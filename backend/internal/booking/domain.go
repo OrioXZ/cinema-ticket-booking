@@ -69,7 +69,7 @@ type SeatLock struct {
 	UserID         string    `json:"user_id"`
 	OwnershipToken string    `json:"ownership_token"`
 	ExpiresAt      time.Time `json:"expires_at"`
-	Generation     int64     `json:"-"`
+	Generation     int64     `json:"revision"`
 }
 
 type Seat struct {

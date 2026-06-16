@@ -124,9 +124,16 @@ async function selectSeat(seat: Seat) {
   error.value = ''
   message.value = ''
   try {
-    activeLock.value = await lockSeat(props.selectedId, seat.seat_no)
+    const lock = await lockSeat(props.selectedId, seat.seat_no)
+    activeLock.value = lock
+    latestRealtime.set(`${lock.showtime_id}:${lock.seat_no}`, {
+      revision: lock.revision,
+      state: 'LOCKED',
+    })
     seats.value = seats.value.map((item) =>
-      item.seat_no === seat.seat_no ? { ...item, state: 'LOCKED' } : item,
+      item.seat_no === seat.seat_no
+        ? { ...item, state: 'LOCKED', revision: lock.revision }
+        : item,
     )
     startCountdown()
   } catch (value) {

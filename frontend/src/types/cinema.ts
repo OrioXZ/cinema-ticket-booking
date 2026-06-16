@@ -32,6 +32,7 @@ export type SeatLock = {
   user_id: string
   ownership_token: string
   expires_at: string
+  revision: number
 }
 
 export type Booking = {
