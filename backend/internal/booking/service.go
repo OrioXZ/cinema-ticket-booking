@@ -71,8 +71,12 @@ func (s *Service) SeatMap(ctx context.Context, showtimeID string) ([]Seat, error
 	seats := make([]Seat, 0, len(showtime.Seats))
 	for _, seatNo := range showtime.Seats {
 		state := SeatStateAvailable
-		revision := projections[seatNo].Revision
-		if lock, ok := locked[seatNo]; ok {
+		projection := projections[seatNo]
+		revision := projection.Revision
+		if projection.State == SeatStateBooked {
+			state = SeatStateBooked
+		}
+		if lock, ok := locked[seatNo]; ok && state != SeatStateBooked {
 			state = SeatStateLocked
 			revision = lock.Generation
 		}

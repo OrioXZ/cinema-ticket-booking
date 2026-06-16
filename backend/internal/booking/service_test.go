@@ -386,6 +386,22 @@ func TestSeatMapIncludesProjectionRevisions(t *testing.T) {
 	}
 }
 
+func TestSeatMapUsesBookedProjectionWhenMongoSnapshotMissesConfirmation(t *testing.T) {
+	service, _, locks := newTestService()
+	locks.projections[lockKey("showtime-1", "A1")] = SeatProjection{
+		State:    SeatStateBooked,
+		Revision: 11,
+	}
+
+	seats, err := service.SeatMap(context.Background(), "showtime-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seats[0].State != SeatStateBooked || seats[0].Revision != 11 {
+		t.Fatalf("A1 = %#v, want BOOKED revision 11", seats[0])
+	}
+}
+
 func TestSeatMapUsesLockWhenAcquireLandsBetweenProjectionAndLockReads(t *testing.T) {
 	service, _, locks := newTestService()
 	locks.afterGetProjections = func() {
