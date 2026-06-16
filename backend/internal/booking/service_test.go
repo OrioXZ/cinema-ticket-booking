@@ -356,6 +356,56 @@ func TestSeatMapResolvesAvailableLockedAndBooked(t *testing.T) {
 	}
 }
 
+func TestSeatMapIncludesProjectionRevisions(t *testing.T) {
+	service, bookings, locks := newTestService()
+	lock := SeatLock{
+		ShowtimeID: "showtime-1", SeatNo: "A1", UserID: "user-1", OwnershipToken: "token",
+	}
+	locks.put(lock, lockTTL)
+	bookings.items = append(bookings.items, Booking{
+		ID: "booking-1", ShowtimeID: "showtime-1", SeatNo: "A2", Status: BookingStatusConfirmed,
+	})
+	locks.projections[lockKey("showtime-1", "A2")] = SeatProjection{
+		State:    SeatStateBooked,
+		Revision: 7,
+	}
+
+	seats, err := service.SeatMap(context.Background(), "showtime-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Seat{}
+	for _, seat := range seats {
+		got[seat.SeatNo] = seat
+	}
+	if got["A1"].Revision == 0 || got["A1"].State != SeatStateLocked {
+		t.Fatalf("A1 = %#v, want locked with revision", got["A1"])
+	}
+	if got["A2"].State != SeatStateBooked || got["A2"].Revision != 7 {
+		t.Fatalf("A2 = %#v, want booked revision 7", got["A2"])
+	}
+}
+
+func TestSeatMapUsesLockWhenAcquireLandsBetweenProjectionAndLockReads(t *testing.T) {
+	service, _, locks := newTestService()
+	locks.afterGetProjections = func() {
+		locks.put(SeatLock{
+			ShowtimeID:     "showtime-1",
+			SeatNo:         "A1",
+			UserID:         "user-1",
+			OwnershipToken: "token",
+		}, lockTTL)
+	}
+
+	seats, err := service.SeatMap(context.Background(), "showtime-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seats[0].State != SeatStateLocked || seats[0].Revision == 0 {
+		t.Fatalf("A1 = %#v, want LOCKED with lock revision", seats[0])
+	}
+}
+
 func newTestService() (*Service, *fakeBookings, *fakeLocks) {
 	return newTestServiceWithLogger(log.New(&bytes.Buffer{}, "", 0))
 }
@@ -366,8 +416,9 @@ func newTestServiceWithLogger(logger Logger) (*Service, *fakeBookings, *fakeLock
 	}}
 	bookings := &fakeBookings{}
 	locks := &fakeLocks{
-		items: make(map[string]fakeLockEntry),
-		now:   time.Now,
+		items:       make(map[string]fakeLockEntry),
+		projections: make(map[string]SeatProjection),
+		now:         time.Now,
 	}
 	return NewService(catalog, bookings, locks, events.NoopPublisher{}, logger), bookings, locks
 }
@@ -487,13 +538,15 @@ type fakeLockEntry struct {
 }
 
 type fakeLocks struct {
-	mu         sync.Mutex
-	items      map[string]fakeLockEntry
-	now        func() time.Time
-	generation int64
-	publisher  events.Publisher
-	verifyErr  error
-	releaseErr error
+	mu                  sync.Mutex
+	items               map[string]fakeLockEntry
+	projections         map[string]SeatProjection
+	now                 func() time.Time
+	generation          int64
+	publisher           events.Publisher
+	verifyErr           error
+	releaseErr          error
+	afterGetProjections func()
 }
 
 func (f *fakeLocks) Acquire(
@@ -512,6 +565,8 @@ func (f *fakeLocks) Acquire(
 	f.generation++
 	lock.Generation = f.generation
 	f.items[key] = fakeLockEntry{lock: lock, expiresAt: f.now().Add(ttl)}
+	f.ensureProjections()
+	f.projections[key] = SeatProjection{State: SeatStateLocked, Revision: lock.Generation}
 	event.Generation = lock.Generation
 	if f.publisher != nil {
 		_ = f.publisher.Publish(ctx, event)
@@ -540,6 +595,23 @@ func (f *fakeLocks) GetMany(_ context.Context, showtimeID string, seatNos []stri
 		if entry, exists := f.items[lockKey(showtimeID, seatNo)]; exists {
 			result[seatNo] = entry.lock
 		}
+	}
+	return result, nil
+}
+
+func (f *fakeLocks) GetProjections(_ context.Context, showtimeID string, seatNos []string) (map[string]SeatProjection, error) {
+	f.mu.Lock()
+	f.removeExpired()
+	result := make(map[string]SeatProjection)
+	for _, seatNo := range seatNos {
+		if projection, exists := f.projections[lockKey(showtimeID, seatNo)]; exists {
+			result[seatNo] = projection
+		}
+	}
+	afterGetProjections := f.afterGetProjections
+	f.mu.Unlock()
+	if afterGetProjections != nil {
+		afterGetProjections()
 	}
 	return result, nil
 }
@@ -585,6 +657,8 @@ func (f *fakeLocks) Release(
 		return ReleaseNotOwned, nil
 	}
 	delete(f.items, key)
+	f.ensureProjections()
+	f.projections[key] = SeatProjection{State: SeatStateAvailable, Revision: entry.lock.Generation}
 	event.Generation = entry.lock.Generation
 	if f.publisher != nil {
 		_ = f.publisher.Publish(ctx, event)
@@ -613,6 +687,8 @@ func (f *fakeLocks) Confirm(
 	if generation == 0 {
 		generation = f.generation
 	}
+	f.ensureProjections()
+	f.projections[key] = SeatProjection{State: SeatStateBooked, Revision: generation}
 	event.Generation = generation
 	if f.publisher != nil {
 		return f.publisher.Publish(ctx, event)
@@ -631,6 +707,17 @@ func (f *fakeLocks) put(lock SeatLock, ttl time.Duration) {
 	}
 	f.items[lockKey(lock.ShowtimeID, lock.SeatNo)] = fakeLockEntry{
 		lock: lock, expiresAt: f.now().Add(ttl),
+	}
+	f.ensureProjections()
+	f.projections[lockKey(lock.ShowtimeID, lock.SeatNo)] = SeatProjection{
+		State:    SeatStateLocked,
+		Revision: lock.Generation,
+	}
+}
+
+func (f *fakeLocks) ensureProjections() {
+	if f.projections == nil {
+		f.projections = make(map[string]SeatProjection)
 	}
 }
 

@@ -27,9 +27,8 @@ const message = ref('')
 const error = ref('')
 const remaining = ref(0)
 let refreshGeneration = 0
-let realtimeSequence = 0
 let countdown: number | null = null
-const latestRealtime = new Map<string, { sequence: number; state: Seat['state'] }>()
+const latestRealtime = new Map<string, { revision: number; state: Seat['state'] }>()
 
 const showtimeId = computed(() => props.selectedId)
 const selected = computed(() =>
@@ -61,7 +60,6 @@ async function refreshSeats() {
   if (!props.selectedId) return
   const generation = ++refreshGeneration
   const requestedShowtime = props.selectedId
-  const realtimeAtStart = realtimeSequence
   loading.value = true
   try {
     const result = await getSeats(requestedShowtime)
@@ -69,8 +67,8 @@ async function refreshSeats() {
 
     seats.value = result.map((seat) => {
       const realtime = latestRealtime.get(`${requestedShowtime}:${seat.seat_no}`)
-      return realtime && realtime.sequence > realtimeAtStart
-        ? { ...seat, state: realtime.state }
+      return realtime && shouldApplyUpdate(seat, realtime)
+        ? { ...seat, state: realtime.state, revision: realtime.revision }
         : seat
     })
   } catch (value) {
@@ -82,6 +80,17 @@ async function refreshSeats() {
       loading.value = false
     }
   }
+}
+
+function shouldApplyUpdate(
+  seat: Pick<Seat, 'state' | 'revision'>,
+  update: Pick<SeatUpdate, 'state' | 'revision'>,
+) {
+  if (seat.state === 'BOOKED' && update.state !== 'BOOKED') return false
+  if (update.revision < seat.revision) return false
+  if (update.revision > seat.revision) return true
+  if (update.state === 'BOOKED' && seat.state !== 'BOOKED') return true
+  return seat.state === 'LOCKED' && update.state === 'AVAILABLE'
 }
 
 function updateCountdown() {
@@ -165,15 +174,28 @@ async function confirm() {
 function applyUpdate(update: SeatUpdate) {
   if (update.showtime_id !== props.selectedId) return
 
-  const sequence = ++realtimeSequence
-  latestRealtime.set(`${update.showtime_id}:${update.seat_no}`, {
-    sequence,
+  const key = `${update.showtime_id}:${update.seat_no}`
+  const previous = latestRealtime.get(key)
+  if (
+    previous &&
+    !shouldApplyUpdate(
+      { state: previous.state, revision: previous.revision },
+      update,
+    )
+  ) return
+
+  latestRealtime.set(key, {
+    revision: update.revision,
     state: update.state,
   })
-  seats.value = seats.value.map((seat) =>
-    seat.seat_no === update.seat_no ? { ...seat, state: update.state } : seat,
-  )
+  let applied = false
+  seats.value = seats.value.map((seat) => {
+    if (seat.seat_no !== update.seat_no || !shouldApplyUpdate(seat, update)) return seat
+    applied = true
+    return { ...seat, state: update.state, revision: update.revision }
+  })
   if (
+    applied &&
     activeLock.value?.seat_no === update.seat_no &&
     (update.state === 'AVAILABLE' || update.state === 'BOOKED')
   ) {

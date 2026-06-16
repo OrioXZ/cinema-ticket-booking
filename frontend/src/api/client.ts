@@ -10,15 +10,14 @@ export type APIRequestOptions = Omit<RequestInit, 'headers'> & {
 let serverClockOffsetMs = 0
 let hasServerClockSample = false
 
-function captureServerClock(response: Response, requestStartedAt: number, responseReceivedAt: number) {
+function captureServerClock(response: Response, responseReceivedAt: number) {
   const rawDate = response.headers.get('Date')
   if (!rawDate) return
 
   const serverTimestamp = Date.parse(rawDate)
   if (!Number.isFinite(serverTimestamp)) return
 
-  const clientMidpoint = requestStartedAt + (responseReceivedAt - requestStartedAt) / 2
-  serverClockOffsetMs = serverTimestamp - clientMidpoint
+  serverClockOffsetMs = serverTimestamp - responseReceivedAt
   hasServerClockSample = true
 }
 
@@ -49,12 +48,11 @@ export async function apiRequest(
     }
   }
 
-  const requestStartedAt = Date.now()
   const response = await fetch(`/api${path.startsWith('/') ? path : `/${path}`}`, {
     ...requestOptions,
     headers,
   })
-  captureServerClock(response, requestStartedAt, Date.now())
+  captureServerClock(response, Date.now())
   return response
 }
 

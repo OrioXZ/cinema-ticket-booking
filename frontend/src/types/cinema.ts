@@ -23,6 +23,7 @@ export type ShowtimeSummary = {
 export type Seat = {
   seat_no: string
   state: SeatState
+  revision: number
 }
 
 export type SeatLock = {
