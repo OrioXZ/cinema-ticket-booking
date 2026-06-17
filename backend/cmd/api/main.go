@@ -148,7 +148,7 @@ func run() error {
 	}
 	go func() {
 		for workerError := range workers.Errors() {
-			log.Printf("%s stopped with error", workerError.Name)
+			log.Printf("%s stopped with error: %v", workerError.Name, workerError.Err)
 		}
 	}()
 
