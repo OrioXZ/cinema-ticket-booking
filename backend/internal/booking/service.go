@@ -88,6 +88,11 @@ func (s *Service) SeatMap(ctx context.Context, showtimeID string) ([]Seat, error
 	return seats, nil
 }
 
+// AcquireLock path index: Handler.acquireLock -> Service.AcquireLock ->
+// BookingRepository.IsBooked (MongoDB) -> LockRepository.Acquire (Redis Lua,
+// publishes events) -> realtime.Consumer/Hub WebSocket projection and
+// audit.Consumer async logging. Service.Confirm still relies on MongoDB's
+// unique (showtime_id, seat_no) index as the final double-booking barrier.
 func (s *Service) AcquireLock(ctx context.Context, showtimeID, seatNo, userID string) (SeatLock, error) {
 	showtimeID = strings.TrimSpace(showtimeID)
 	seatNo = strings.ToUpper(strings.TrimSpace(seatNo))

@@ -51,6 +51,9 @@ func (h *Handler) Get(c *gin.Context) {
 		c.Status(http.StatusBadRequest)
 		return
 	}
+	// MVP room membership is a transient projection: rooms are created lazily
+	// for any non-empty showtime ID and are not validated against durable
+	// showtimes. MongoDB and REST remain authoritative for booking state.
 	connection, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
